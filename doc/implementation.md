@@ -1,6 +1,10 @@
-# ProjectGen × Continue 实施指南
+# ProjectGen × Continue 实施指南（修订版）
 
-本指南提供了将 ProjectGen 集成到 Continue VSCode 插件的详细步骤。
+**版本**: 2.0  
+**基于**: FINAL_DESIGN_PROPOSAL_REVISED.md  
+**更新日期**: 2026年1月21日
+
+本指南提供了将 ProjectGen 集成到 Continue VSCode 插件的详细步骤，**基于实际代码分析修正**。
 
 ---
 
@@ -8,41 +12,88 @@
 
 ### 环境要求
 
-- **Python**: 3.9+
+- **Python**: 3.9+ (与 src/ 中的代码保持一致)
 - **Node.js**: 18.0+
 - **VSCode**: 1.70.0+
-- **Git**: 用于克隆 Continue 仓库
+- **系统**: macOS/Linux (Windows 需要额外配置)
+
+### 已安装的依赖
+
+确保 `src/` 目录可以正常运行：
+```bash
+cd src
+pip install -r ../requirements.txt
+python main.py --dataset CodeProjectEval  # 测试是否正常
+```
 
 ### 技能要求
 
 - 基础的 Python 和 TypeScript 知识
 - 了解 FastAPI 和 VSCode 扩展开发
-- 熟悉命令行操作
+- 理解线程和异步编程
 
 ---
 
-## 🚀 快速开始（5分钟）
+## 🚀 快速开始（10分钟）
 
-### 步骤 1: 启动 ProjectGen Server
+### 步骤 1: 创建 projectgen-server 目录结构
 
 ```bash
-# 进入服务器目录
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen
+mkdir -p projectgen-server
 cd projectgen-server
+```
 
-# 安装依赖
+### 步骤 2: 创建 requirements.txt
+
+```bash
+cat > requirements.txt << 'EOF'
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.4.2
+python-dotenv==1.0.0
+EOF
+```
+
+### 步骤 3: 安装依赖
+
+```bash
 pip install -r requirements.txt
+```
 
-# 启动服务器
+### 步骤 4: 创建 .env 文件
+
+```bash
+cat > .env << 'EOF'
+PROJECTGEN_DATASET_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
+PROJECTGEN_OUTPUT_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
+PORT=5000
+EOF
+```
+
+### 步骤 5: 创建服务器文件
+
+参考 FINAL_DESIGN_PROPOSAL_REVISED.md 中的代码，创建：
+- `main.py` - FastAPI 服务器主文件
+- `progress_monitor.py` - 进度监控器
+
+### 步骤 6: 启动服务器
+
+```bash
 python main.py
 ```
 
 你应该看到：
 ```
-INFO:     Started server process
-INFO:     Uvicorn running on http://0.0.0.0:5000
+🚀 ProjectGen Server starting...
+📁 Dataset directory: /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
+📁 Output directory: /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
+🌐 Server running on http://0.0.0.0:5000
+INFO:     Started server process [12345]
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
 ```
 
-### 步骤 2: 测试服务器
+### 步骤 7: 测试服务器
 
 在另一个终端：
 
@@ -52,30 +103,6 @@ curl http://localhost:5000/api/health
 
 # 应该返回：
 # {"status":"healthy","active_tasks":0,"total_tasks":0,"timestamp":"..."}
-```
-
-### 步骤 3: 测试生成 API
-
-```bash
-# 创建测试请求
-curl -X POST http://localhost:5000/api/projects/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dataset": "CodeProjectEval",
-    "repo_name": "test-project",
-    "requirement": "Create a simple calculator",
-    "model": "gpt-4o"
-  }'
-
-# 返回：
-# {"project_id":"xxx-xxx-xxx","status":"started","message":"..."}
-```
-
-### 步骤 4: 查询状态
-
-```bash
-# 使用上面返回的 project_id
-curl http://localhost:5000/api/projects/{project_id}/status
 ```
 
 ---
