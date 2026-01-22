@@ -1,8 +1,19 @@
 # ProjectGen × Continue "套壳"集成方案
 
-**版本**: 5.0 (简化版，易于理解)  
-**日期**: 2026年1月21日  
+**版本**: 6.0 (修订版，修复问题)  
+**日期**: 2026年1月22日  
 **核心理念**: Continue 只提供聊天界面，ProjectGen 核心代码(src/)完全不动
+
+---
+
+## ⚠️ 重要修订说明
+
+本版本修复了以下问题：
+1. 修正了项目路径（`new-projectgen` → `codegen-on-continue`）
+2. 修正了 TypeScript 代码中的接口类型问题
+3. 补充了 config.json 中文件路径的正确解析逻辑
+4. 增加了 AbortController 支持和更完善的错误处理
+5. 修正了 Continue SDK 的正确用法（`fetch` 从参数解构获取）
 
 ---
 
@@ -86,30 +97,6 @@ Continue 能帮我们做这些事：
 - 📁 **获取工作区**：`ide.getWorkspaceDirs()` - 知道当前项目在哪
 - 💬 **聊天界面**：显示进度、错误信息🏗️ 修订后的架构设计
 
-### 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Continue VSCode Extension                                  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  SlashCommand: /projectgen                            │  │
-│  │  1. 解析参数 (repo, dataset)                         │  │
-│  │  2. 读取 PRD.md (使用 IDE.readFile)                  │  │
-│  │  3. POST /api/projects/generate                      │  │
-│  │  4. 轮询 GET /api/projects/{id}/status               │  │
-│  │  5. 读取生成的文件 (从 repo_dir/tmp_files/)         │  │
-│  │  6. 写入到工作区 (使用 IDE.writeFile)                │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                    ↕ HTTP
-┌─────────────────────────────────────────────────────────────┐
-│  FastAPI Server (projectgen-server/)                        │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  Endpoints:                                            │  │
-│  │  - POST /api/projects/generate                        │  │
-│  │  - GET  /api/projects/{id}/status                     │  │
-│  │  -整体架构（通俗版）
-
 ### 三层结构
 
 ```
@@ -150,7 +137,7 @@ Continue 能帮我们做这些事：
 ### 工作文件结构（重要！看这里）
 
 ```
-new-projectgen/
+codegen-on-continue/                ← 【注意】正确的项目名
 │
 ├── src/                          ← 【不动】你原来的代码
 │   ├── workflow.py              
@@ -160,22 +147,42 @@ new-projectgen/
 │   └── ...                       
 │
 ├── projectgen-server/            ← 【新增】中转服务器（很简单）
-│   ├── main.py                   ← 150行左右的代码
-│   ├── progress_monitor.py       ← 50行左右的代码
+│   ├── main.py                   ← 约180行的代码（含完整错误处理）
+│   ├── progress_monitor.py       ← 约80行的代码（更健壮的解析）
 │   ├── requirements.txt          ← 4个依赖包
 │   └── .env                      ← 配置文件（设置路径）
 │
 ├── continue/                     ← 【小改】只加一个命令
 │   └── core/commands/slash/built-in-legacy/
-│       ├── index.ts              ← 改1行（注册命令）
-│       └── projectgen.ts         ← 新增（300行左右）
+│       ├── index.ts              ← 改2行（导入+注册命令）
+│       └── projectgen.ts         ← 新增（约350行）
 │
 ├── datasets/                     ← 【不动】你的数据集
 │   ├── CodeProjectEval/
+│   │   └── bplustree/
+│   │       ├── config.json       ← 配置文件（指定PRD等路径）
+│   │       └── docs/
+│   │           └── PRD.md        ← 【注意】PRD在docs子目录下
 │   └── DevBench/
 │
 └── outputs/                      ← 【自动创建】生成的代码保存在这里
 ```
+
+### 关于 config.json 的重要说明
+
+每个项目的 `config.json` 指定了各个文件的相对路径：
+
+```json
+{
+    "PRD": "docs/PRD.md",              // PRD文件路径
+    "UML": ["docs/UML.md", "docs/UML_pyreverse.md"],  // UML文件
+    "architecture_design": "docs/architecture_design.md",
+    "language": "python",
+    ...
+}
+```
+
+**关键**：代码需要先读取 `config.json`，然后拼接路径读取实际文件！
 
 ### 新增文件说明
 
@@ -384,9 +391,16 @@ if __name__ == "__main__":
 **关键点**：
 - 只有 `graph.invoke(...)` 这一行是调用你的代码
 - 其他都是"包装"工作：接收请求、返回结果
-- 总共不到150行代码
+- 需要导入 `calculate_progress` 函数
+
+### 完整的服务器代码 `projectgen-server/main.py`
 
 ```python
+"""
+ProjectGen Server - 轻量级 API 服务器
+用于接收 Continue 的请求，调用 src/workflow.py 生成代码
+"""
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -397,16 +411,20 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional, List, Dict
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # 添加 src 到路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from progress_monitor import ProgressMonitor, detect_current_stage
+from progress_monitor import detect_current_stage, calculate_progress
 
 app = FastAPI(title="ProjectGen Server", version="1.0.0")
 
-# CORS
+# CORS - 允许 Continue 跨域访问
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -440,6 +458,7 @@ class GenerateRequest(BaseModel):
     uml_sequence: str = ""
     arch_design: str = ""
     model: str = "gpt-4o"
+    code_file_DAG: List[str] = []
 
 
 class ProjectStatus(BaseModel):
@@ -638,14 +657,21 @@ if __name__ == "__main__":
 
 这个文件做什么？通过查看 tmp_files/ 目录里的文件，判断当前进度。
 
-**核心逻辑**（很简单）：
+**核心逻辑**（更健壮的版本）：
 
 ```python
 import os
+import re
+from typing import Tuple, List
 
-def detect_current_stage(repo_dir):
-    """看看 tmp_files/ 里有哪些文件，判断跑到哪了"""
-    tmp_dir = f"{repo_dir}/tmp_files"
+def detect_current_stage(repo_dir: str) -> Tuple[str, int]:
+    """
+    查看 tmp_files/ 里有哪些文件，判断当前执行到哪个阶段
+    
+    返回: (阶段名, 最大迭代次数)
+    阶段: "architecture" | "skeleton" | "code"
+    """
+    tmp_dir = os.path.join(repo_dir, "tmp_files")
     
     # 目录不存在 = 还没开始
     if not os.path.exists(tmp_dir):
@@ -653,35 +679,92 @@ def detect_current_stage(repo_dir):
     
     files = os.listdir(tmp_dir)
     
-    # 如果有 generated_code_*.jsonl = 在跑代码生成
-    code_files = [f for f in files if f.startswith("generated_code_")]
-    if code_files:
-        # 找最大的数字，比如 generated_code_3.jsonl → 第3次迭代
-        max_step = max([int(f.split("_")[-1].replace(".jsonl", "")) 
-                       for f in code_files])
-        return "code", max_step
+    # 提取文件中的数字（支持多种命名格式）
+    def extract_step_numbers(files: List[str], prefix: str) -> List[int]:
+        """从文件名中提取步骤数字"""
+        numbers = []
+        for f in files:
+            if f.startswith(prefix):
+                # 尝试匹配各种格式: xxx_1.json, xxx_step1.json, xxx1.json
+                match = re.search(r'(\d+)', f.replace(prefix, ''))
+                if match:
+                    numbers.append(int(match.group(1)))
+        return numbers
     
-    # 如果有 skeleton_*.json = 在跑骨架生成
-    skeleton_files = [f for f in files if f.startswith("skeleton_")]
-    if skeleton_files:
-        max_step = max([int(f.split("_")[-1].replace(".json", "")) 
-                       for f in skeleton_files])
-        return "skeleton", max_step
+    # 检查代码生成阶段（最后阶段）
+    code_numbers = extract_step_numbers(files, "generated_code")
+    if code_numbers:
+        return "code", max(code_numbers)
     
-    # 如果有 architecture_*.json = 在跑架构设计
-    arch_files = [f for f in files if f.startswith("architecture_")]
-    if arch_files:
-        max_step = max([int(f.split("_")[-1].replace(".json", "")) 
-                       for f in arch_files])
-        return "architecture", max_step
+    # 检查骨架生成阶段
+    skeleton_numbers = extract_step_numbers(files, "skeleton")
+    if skeleton_numbers:
+        return "skeleton", max(skeleton_numbers)
     
+    # 检查架构设计阶段
+    arch_numbers = extract_step_numbers(files, "architecture")
+    if arch_numbers:
+        return "architecture", max(arch_numbers)
+    
+    # 都没有 = 刚开始
     return "architecture", 0
+
+
+def calculate_progress(stage: str, iteration: int) -> int:
+    """
+    根据阶段和迭代次数估算进度百分比
+    
+    进度分配:
+    - architecture: 0-30%
+    - skeleton: 30-60%  
+    - code: 60-100%
+    """
+    stage_config = {
+        "architecture": {"base": 0, "max": 30, "weight": 10},
+        "skeleton": {"base": 30, "max": 60, "weight": 10},
+        "code": {"base": 60, "max": 100, "weight": 8}
+    }
+    
+    if stage not in stage_config:
+        return 0
+    
+    config = stage_config[stage]
+    progress = config["base"] + min(iteration * config["weight"], config["max"] - config["base"])
+    
+    return min(95, progress)  # 最多95%，完成时才100%
+
+
+class ProgressMonitor:
+    """进度监控器类，提供更丰富的进度信息"""
+    
+    def __init__(self, repo_dir: str):
+        self.repo_dir = repo_dir
+        self.tmp_dir = os.path.join(repo_dir, "tmp_files")
+    
+    def get_status(self) -> dict:
+        """获取完整的进度状态"""
+        stage, iteration = detect_current_stage(self.repo_dir)
+        progress = calculate_progress(stage, iteration)
+        
+        return {
+            "current_stage": stage,
+            "iteration": iteration,
+            "progress": progress,
+            "files": self._list_generated_files()
+        }
+    
+    def _list_generated_files(self) -> List[str]:
+        """列出已生成的文件"""
+        if not os.path.exists(self.tmp_dir):
+            return []
+        return sorted(os.listdir(self.tmp_dir))
 ```
 
 **理解要点**：
 - 不需要改动 agents/ 的代码
 - 只是"旁观者"，看看文件系统了解进度
-- 总共50行代码
+- 支持多种文件命名格式
+- 提供进度百分比估算
 
 ---
 
@@ -703,24 +786,36 @@ const config = parseInput(input, params);
 
 // 获取工作区路径
 const workspaceDirs = await ide.getWorkspaceDirs();
-const workspaceDir = workspaceDirs[0];  // 比如：/Users/lv.sany/.../new-projectgen
+const workspaceDir = workspaceDirs[0];  // 比如：/Users/lv.sany/.../codegen-on-continue
 
-// 读取 PRD.md
-const prdPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/PRD.md`;
+// 【重要】先读取 config.json 获取文件路径
+const configPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/config.json`;
+const configContent = await ide.readFile(configPath);
+const repoConfig = JSON.parse(configContent);
+
+// 然后根据 config.json 中指定的路径读取 PRD.md
+const prdPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/${repoConfig.PRD}`;
 const requirement = await ide.readFile(prdPath);
+// 注意：repoConfig.PRD 的值是 "docs/PRD.md"，所以实际路径是 .../bplustree/docs/PRD.md
 ```
 
 #### 第2部分：启动任务
 
 ```typescript
-// 发送请求到服务器
+// 【重要】fetch 是从 ContinueSDK 参数中解构获取的，不是全局的 fetch
+// SlashCommand.run 的签名是: run: (sdk: ContinueSDK) => AsyncGenerator<string>
+// sdk 包含: { ide, llm, input, params, fetch, abortController, ... }
+
 const response = await fetch(`http://localhost:5000/api/projects/generate`, {
   method: "POST",
+  headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     repo_name: config.repo_name,
     requirement: requirement,
     dataset: config.dataset,
-    model: config.model
+    model: config.model,
+    uml_class: umlClass,      // 从 config.json 读取的 UML
+    arch_design: archDesign   // 从 config.json 读取的架构设计
   })
 });
 
@@ -731,24 +826,34 @@ const { project_id } = await response.json();
 #### 第3部分：轮询进度
 
 ```typescript
-// 每隔3秒问一次
+// 【重要】需要检查 abortController.signal 来支持用户取消
 while (!isComplete) {
+  // 检查是否被用户取消
+  if (abortController.signal.aborted) {
+    yield "\n⚠️ Generation cancelled by user\n";
+    break;
+  }
+  
   await sleep(3000);  // 等3秒
   
   // 问服务器：跑到哪了？
   const status = await fetch(`http://localhost:5000/api/projects/${project_id}/status`);
+  const statusData = await status.json();
   
   // 在聊天窗口显示进度
-  if (status.current_stage === "architecture") {
-    yield "🏗️ Architecture Design - Iteration " + status.iteration + "\n";
+  if (statusData.current_stage === "architecture") {
+    yield "🏗️ Architecture Design - Iteration " + statusData.iteration + "\n";
   }
   
   // 显示进度条
-  yield `[████████░░░░░░░░░░░░] ${status.progress}%\n`;
+  yield `[████████░░░░░░░░░░░░] ${statusData.progress}%\n`;
   
   // 如果完成了，跳出循环
-  if (status.status === "completed") {
+  if (statusData.status === "completed") {
     isComplete = true;
+  } else if (statusData.status === "failed") {
+    yield `\n❌ Error: ${statusData.error}\n`;
+    return;  // 提前退出
   }
 }
 ```
@@ -773,7 +878,78 @@ yield "🎉 完成！\n";
 **理解要点**：
 - 这个文件就是"界面逻辑"
 - 不涉及代码生成的核心算法
-- 总共300行左右，大部分是显示和格式化
+- 总共约350行，大部分是显示和格式化
+- **fetch 从 SDK 参数解构获取，不是全局变量**
+- **需要检查 abortController 支持用户取消**
+
+### 完整的 projectgen.ts 代码
+
+```typescript
+/**
+ * ProjectGen Slash Command for Continue
+ * 
+ * 用法: /projectgen repo=<repo_name> [dataset=<dataset>] [model=<model>]
+ * 例如: /projectgen repo=bplustree dataset=CodeProjectEval model=gpt-4o
+ */
+
+import { SlashCommand } from "../../../index.js";
+
+// 类型定义
+interface GeneratedFile {
+  path: string;
+  content: string;
+}
+
+interface RepoConfig {
+  PRD: string;
+  UML?: string[];
+  architecture_design?: string;
+  language?: string;
+  code_file_DAG?: string[];
+}
+
+interface ProjectStatus {
+  project_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  current_stage: string;
+  iteration: number;
+  progress: number;
+  message?: string;
+  error?: string;
+  result?: {
+    arch_steps?: number;
+    skeleton_steps?: number;
+    code_steps?: number;
+  };
+}
+
+// 服务器地址（可配置）
+const SERVER_URL = "http://localhost:5000";
+
+const ProjectGenSlashCommand: SlashCommand = {
+  name: "projectgen",
+  description: "Generate a complete project using multi-agent workflow",
+  run: async function* ({ ide, input, params, fetch, abortController }) {
+    // 【重要】fetch 是从 SDK 参数中解构获取的，不是全局 fetch
+    
+    try {
+      // 1. 解析用户输入
+      const config = parseInput(input, params);
+      
+      yield "🚀 **ProjectGen - Multi-Agent Project Generation**\n\n";
+      
+      if (!config.repo_name) {
+        yield "❌ Error: Please specify repository name\n";
+        yield "Usage: `/projectgen repo=<name> [dataset=<dataset>] [model=<model>]`\n";
+        yield "Example: `/projectgen repo=bplustree dataset=CodeProjectEval`\n";
+        return;
+      }
+      
+      yield "📋 **Configuration:**\n";
+      yield `- Repository: \`${config.repo_name}\`\n`;
+      yield `- Dataset: \`${config.dataset}\`\n`;
+      yield `- Model: \`${config.model}\`\n\n`;
+      
       // 2. 获取工作区目录
       const workspaceDirs = await ide.getWorkspaceDirs();
       if (!workspaceDirs || workspaceDirs.length === 0) {
@@ -782,58 +958,91 @@ yield "🎉 完成！\n";
       }
       const workspaceDir = workspaceDirs[0];
       
-      // 3. 读取 PRD.md
+      // 3. 【修正】先读取 config.json 获取文件路径
+      yield "📖 Reading project configuration...\n";
+      const repoDir = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}`;
+      const configPath = `${repoDir}/config.json`;
+      
+      let repoConfig: RepoConfig;
+      try {
+        const configContent = await ide.readFile(configPath);
+        repoConfig = JSON.parse(configContent);
+      } catch (e) {
+        yield `❌ Error: Cannot read config.json at ${configPath}\n`;
+        yield `Please ensure the file exists.\n`;
+        return;
+      }
+      
+      // 4. 【修正】根据 config.json 读取 PRD
       yield "📖 Reading PRD...\n";
-      const prdPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/PRD.md`;
+      const prdPath = `${repoDir}/${repoConfig.PRD}`;  // 例如: .../bplustree/docs/PRD.md
       let requirement: string;
       try {
         requirement = await ide.readFile(prdPath);
         yield `✅ PRD loaded (${requirement.length} chars)\n\n`;
       } catch (e) {
         yield `❌ Error: Cannot read PRD file at ${prdPath}\n`;
-        yield `Please ensure the file exists.\n`;
+        yield `(config.json specifies PRD as "${repoConfig.PRD}")\n`;
         return;
       }
       
-      // 4. 读取其他配置文件（如果存在）
+      // 5. 读取其他配置文件（UML、架构设计等）
       let umlClass = "";
       let archDesign = "";
+      
       try {
-        const configPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/config.json`;
-        const configContent = await ide.readFile(configPath);
-        const repoConfig = JSON.parse(configContent);
-        
         if (repoConfig.architecture_design) {
-          const archPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/${repoConfig.architecture_design}`;
+          const archPath = `${repoDir}/${repoConfig.architecture_design}`;
           archDesign = await ide.readFile(archPath);
+          yield `✅ Architecture design loaded\n`;
         }
         
+        // 读取 UML（优先使用 pyreverse 版本）
         if (repoConfig.UML && repoConfig.UML.length > 0) {
-          const umlPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/${repoConfig.UML[0]}`;
-          umlClass = await ide.readFile(umlPath);
+          for (const umlFile of repoConfig.UML) {
+            if (umlFile.includes("pyreverse")) {
+              const umlPath = `${repoDir}/${umlFile}`;
+              umlClass = await ide.readFile(umlPath);
+              yield `✅ UML loaded (${umlFile})\n`;
+              break;
+            }
+          }
+          // 如果没有 pyreverse 版本，使用第一个
+          if (!umlClass && repoConfig.UML.length > 0) {
+            const umlPath = `${repoDir}/${repoConfig.UML[0]}`;
+            umlClass = await ide.readFile(umlPath);
+            yield `✅ UML loaded (${repoConfig.UML[0]})\n`;
+          }
         }
       } catch (e) {
-        // 配置文件可选，失败不影响继续
+        // 这些文件是可选的，读取失败不影响继续
+        yield `⚠️ Some optional files could not be loaded\n`;
       }
       
-      // 5. 检查服务器连接
+      yield "\n";
+      
+      // 6. 检查服务器连接
       yield "🔌 Connecting to ProjectGen server...\n";
       try {
-        const healthCheck = await fetch(`${serverUrl}/api/health`);
+        const healthCheck = await fetch(`${SERVER_URL}/api/health`);
         if (!healthCheck.ok) {
           yield "❌ Error: Server returned error status\n";
           return;
         }
-        yield "✅ Server connected\n\n";
+        const healthData = await healthCheck.json();
+        yield `✅ Server connected (${healthData.active_tasks} active tasks)\n\n`;
       } catch (e) {
         yield "❌ Error: Cannot connect to ProjectGen server\n";
-        yield `Please start the server: \`cd projectgen-server && python main.py\`\n`;
+        yield "Please start the server:\n";
+        yield "```bash\n";
+        yield "cd projectgen-server && python main.py\n";
+        yield "```\n";
         return;
       }
       
-      // 6. 启动生成任务
+      // 7. 启动生成任务
       yield "📤 Starting generation task...\n";
-      const startResponse = await fetch(`${serverUrl}/api/projects/generate`, {
+      const startResponse = await fetch(`${SERVER_URL}/api/projects/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -841,8 +1050,10 @@ yield "🎉 完成！\n";
           repo_name: config.repo_name,
           requirement,
           uml_class: umlClass,
+          uml_sequence: "",  // DevBench 才需要
           arch_design: archDesign,
           model: config.model,
+          code_file_DAG: repoConfig.code_file_DAG || [],
         }),
       });
       
@@ -855,7 +1066,7 @@ yield "🎉 完成！\n";
       const { project_id } = await startResponse.json();
       yield `🆔 Project ID: \`${project_id}\`\n\n`;
       
-      // 7. 显示工作流图
+      // 8. 显示工作流图
       yield "📊 **Workflow:**\n\n";
       yield "```\n";
       yield "┌──────────────┐     ┌──────────────┐     ┌──────────────┐\n";
@@ -866,22 +1077,29 @@ yield "🎉 完成！\n";
       yield "   (Iterate)            (Iterate)           (Iterate)\n";
       yield "```\n\n";
       
-      // 8. 轮询状态
+      // 9. 轮询状态
       yield "⏳ **Progress:**\n\n";
       let lastStage = "";
       let lastIteration = 0;
       let isComplete = false;
       
       while (!isComplete) {
+        // 【重要】检查用户是否取消
+        if (abortController.signal.aborted) {
+          yield "\n⚠️ Generation cancelled by user\n";
+          // TODO: 可以调用服务器的取消接口
+          return;
+        }
+        
         await new Promise(resolve => setTimeout(resolve, 3000));
         
-        const statusResponse = await fetch(`${serverUrl}/api/projects/${project_id}/status`);
+        const statusResponse = await fetch(`${SERVER_URL}/api/projects/${project_id}/status`);
         if (!statusResponse.ok) {
           yield `❌ Error checking status\n`;
           return;
         }
         
-        const status = await statusResponse.json();
+        const status: ProjectStatus = await statusResponse.json();
         
         // 检测阶段变化
         if (status.current_stage !== lastStage) {
@@ -900,14 +1118,14 @@ yield "🎉 完成！\n";
         
         // 显示进度条
         const bar = generateProgressBar(status.progress);
-        yield `\r${bar} ${status.progress}%`;
+        yield `${bar} ${status.progress}%\n`;
         
         if (status.status === "completed") {
-          yield "\n\n🎉 **Generation Completed!**\n\n";
+          yield "\n🎉 **Generation Completed!**\n\n";
           
-          // 9. 获取生成的文件
+          // 10. 获取生成的文件
           yield "📥 Retrieving generated files...\n";
-          const filesResponse = await fetch(`${serverUrl}/api/projects/${project_id}/files`);
+          const filesResponse = await fetch(`${SERVER_URL}/api/projects/${project_id}/files`);
           if (!filesResponse.ok) {
             yield "❌ Error retrieving files\n";
             return;
@@ -917,13 +1135,13 @@ yield "🎉 完成！\n";
           const files: GeneratedFile[] = filesData.files;
           
           if (!files || files.length === 0) {
-            yield "⚠️  No files generated\n";
+            yield "⚠️ No files generated\n";
             return;
           }
           
           yield `✅ Retrieved ${files.length} files\n\n`;
           
-          // 10. 写入文件到工作区
+          // 11. 写入文件到工作区
           yield "📝 Writing files to workspace...\n";
           const outputDir = `${config.dataset}_outputs/${config.repo_name}`;
           
@@ -939,7 +1157,7 @@ yield "🎉 完成！\n";
           
           yield `\n📁 Output directory: \`${outputDir}\`\n\n`;
           
-          // 11. 显示统计
+          // 12. 显示统计
           if (status.result) {
             yield "📊 **Statistics:**\n";
             yield `- Architecture iterations: ${status.result.arch_steps || 0}\n`;
@@ -950,7 +1168,7 @@ yield "🎉 完成！\n";
           
           isComplete = true;
         } else if (status.status === "failed") {
-          yield `\n\n❌ **Generation Failed**\n`;
+          yield `\n❌ **Generation Failed**\n`;
           yield `Error: ${status.error || "Unknown error"}\n`;
           isComplete = true;
         }
@@ -963,13 +1181,15 @@ yield "🎉 完成！\n";
   }
 };
 
-function parseInput(input: string, params: any): any {
-  const config: any = {
+// 辅助函数
+function parseInput(input: string, params: any): { dataset: string; repo_name: string; model: string } {
+  const config = {
     dataset: params?.dataset || "CodeProjectEval",
     repo_name: "",
     model: params?.model || "gpt-4o"
   };
   
+  // 从输入字符串解析参数
   const repoMatch = input.match(/repo=(\S+)/);
   if (repoMatch) config.repo_name = repoMatch[1];
   
@@ -1015,13 +1235,13 @@ export default ProjectGenSlashCommand;
 
 这个文件做什么？告诉 Continue："嘿，我们新增了一个 /projectgen 命令"
 
-**只需改1行**：
+**需要改2行**：
 
 ```typescript
-// 在文件顶部添加导入
+// ① 在文件顶部添加导入（在其他 import 语句附近）
 import ProjectGenSlashCommand from "./projectgen.js";
 
-// 在数组里添加我们的命令
+// ② 在数组里添加我们的命令
 const LegacyBuiltInSlashCommands: SlashCommand[] = [
   DraftIssueCommand,
   ShareSlashCommand,
@@ -1034,6 +1254,10 @@ const LegacyBuiltInSlashCommands: SlashCommand[] = [
 ];
 ```
 
+**⚠️ 注意事项**：
+1. 导入路径必须加 `.js` 后缀（TypeScript 编译要求）
+2. 确保 `projectgen.ts` 文件已创建在同一目录下
+
 ---
 
 ## 🚀 实施步骤（手把手教你）
@@ -1043,7 +1267,7 @@ const LegacyBuiltInSlashCommands: SlashCommand[] = [
 #### 1.1 创建目录
 
 ```bash
-cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue
 mkdir projectgen-server
 cd projectgen-server
 ```
@@ -1069,8 +1293,8 @@ pip install -r requirements.txt
 
 ```bash
 cat > .env << 'EOF'
-PROJECTGEN_DATASET_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
-PROJECTGEN_OUTPUT_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
+PROJECTGEN_DATASET_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue/datasets
+PROJECTGEN_OUTPUT_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue/outputs
 PORT=5000
 EOF
 ```
@@ -1115,7 +1339,7 @@ python main.py
 #### 2.1 找到 Continue 目录
 
 ```bash
-cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue/continue
 ```
 
 #### 2.2 创建 projectgen.ts
@@ -1160,7 +1384,7 @@ const LegacyBuiltInSlashCommands: SlashCommand[] = [
 #### 2.4 编译 Continue
 
 ```bash
-cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue/extensions/vscode
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue/continue/extensions/vscode
 npm install  # 第一次需要
 npm run compile
 ```
@@ -1169,6 +1393,12 @@ npm run compile
 ```
 Compilation complete. Watching for file changes.
 ```
+
+**⚠️ 编译可能遇到的问题**：
+
+1. **TypeScript 类型错误**：确保 `projectgen.ts` 中的类型定义正确
+2. **模块找不到**：检查导入路径是否正确（需要 `.js` 后缀）
+3. **Node.js 版本**：确保使用 18.0+ 版本
 
 ---
 
@@ -1192,7 +1422,7 @@ python main.py
 
 在新的 VSCode 窗口中：
 
-1. 打开你的项目文件夹（new-projectgen）
+1. 打开你的项目文件夹（codegen-on-continue）
 2. 按 `Cmd+L`（Mac）或 `Ctrl+L`（Windows）打开 Continue Chat
 3. 输入命令：
    ```
@@ -1271,11 +1501,11 @@ python main.py
 
 | 文件 | 行数 | 难度 | 说明 |
 |------|------|------|------|
-| `projectgen-server/main.py` | ~150行 | ⭐⭐ | 主要是API接口定义 |
-| `projectgen-server/progress_monitor.py` | ~50行 | ⭐ | 很简单的文件查找 |
-| `continue/.../projectgen.ts` | ~300行 | ⭐⭐⭐ | TypeScript，需要理解异步 |
-| `continue/.../index.ts` | 修改2行 | ⭐ | 只是注册命令 |
-| **总计** | **~500行新代码** | - | src/ 完全不动！ |
+| `projectgen-server/main.py` | ~180行 | ⭐⭐ | 主要是API接口定义 |
+| `projectgen-server/progress_monitor.py` | ~80行 | ⭐ | 文件查找和解析 |
+| `continue/.../projectgen.ts` | ~350行 | ⭐⭐⭐ | TypeScript，需要理解异步 |
+| `continue/.../index.ts` | 修改2行 | ⭐ | 导入+注册命令 |
+| **总计** | **~610行新代码** | - | src/ 完全不动！ |
 
 ---
 
@@ -1293,7 +1523,7 @@ python main.py
 
 1. **服务器（main.py）**：接收请求 → 调用 workflow → 返回结果
 2. **进度监控（progress_monitor.py）**：看文件 → 判断进度
-3. **Continue 命令（projectgen.ts）**：读PRD → 调服务器 → 显示进度 → 写文件
+3. **Continue 命令（projectgen.ts）**：读config.json → 读PRD → 调服务器 → 显示进度 → 写文件
 
 ### 这就是"套壳"：
 
@@ -1303,4 +1533,55 @@ python main.py
 
 ---
 
-## 附录
+## 📋 常见问题补充
+
+### Q1: 为什么 PRD 路径要通过 config.json 读取？
+
+因为不同项目的 PRD 文件位置不同。例如：
+- `bplustree` 的 PRD 在 `docs/PRD.md`
+- 其他项目可能在不同位置
+
+### Q2: ContinueSDK 中的 fetch 和全局 fetch 有什么区别？
+
+Continue 提供的 `fetch` 可能经过了代理处理，能更好地处理跨域和身份验证。始终使用从参数解构的 `fetch`。
+
+### Q3: 为什么需要 AbortController？
+
+用户可能在生成过程中取消操作。检查 `abortController.signal.aborted` 可以优雅地处理取消，而不是让任务一直运行。
+
+### Q4: generated_code 文件的格式是什么？
+
+是 JSONL 格式（每行一个 JSON），结构如下：
+```json
+{"path": "bplustree.py", "content": "class BPlusTree:..."}
+{"path": "node.py", "content": "class Node:..."}
+```
+
+### Q5: workflow.py 中的硬编码路径怎么处理？
+
+当前 `workflow.py` 中有些硬编码路径（如 `TEST_BASE_DIR`）。建议：
+1. 服务器启动时设置环境变量
+2. 或者修改 `workflow.py` 读取环境变量（这需要改 src/，但改动很小）
+
+### Q6: 如何支持 DevBench 数据集？
+
+DevBench 需要额外的 `uml_sequence` 参数，当前代码已支持：
+1. 在 `projectgen.ts` 中判断 dataset 类型
+2. 如果是 DevBench，额外读取 `UML_sequence` 文件
+
+---
+
+## 📝 修订历史
+
+| 版本 | 日期 | 主要变更 |
+|------|------|----------|
+| 5.0 | 2026-01-21 | 初始版本 |
+| 6.0 | 2026-01-22 | 修正路径、TypeScript类型、config.json读取逻辑、AbortController支持 |
+
+---
+
+## 🔗 参考资源
+
+- [Continue 文档](https://docs.continue.dev/)
+- [FastAPI 文档](https://fastapi.tiangolo.com/)
+- [LangGraph 文档](https://langchain-ai.github.io/langgraph/)
