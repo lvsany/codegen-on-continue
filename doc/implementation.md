@@ -1,69 +1,89 @@
-# ProjectGen × Continue 实施指南（修订版）
+# ProjectGen × Continue 实施指南（通俗易懂版）
 
-**版本**: 2.0  
-**基于**: FINAL_DESIGN_PROPOSAL_REVISED.md  
-**更新日期**: 2026年1月21日
-
-本指南提供了将 ProjectGen 集成到 Continue VSCode 插件的详细步骤，**基于实际代码分析修正**。
+**更新日期**: 2026年1月21日  
+**适合人群**: 有基础 Python/TypeScript 知识的开发者  
+**预计时间**: 2-3小时完成所有步骤
 
 ---
 
-## 📋 前置要求
+## 🎯 我们要做什么？
 
-### 环境要求
+把你的 ProjectGen 代码(src/)套上 Continue 的聊天界面，让它更好用。
 
-- **Python**: 3.9+ (与 src/ 中的代码保持一致)
-- **Node.js**: 18.0+
-- **VSCode**: 1.70.0+
-- **系统**: macOS/Linux (Windows 需要额外配置)
+**效果**：
+- 在 VSCode 聊天窗口输入：`/projectgen repo=bplustree`
+- 自动读取配置、生成代码、显示进度
+- 生成的代码直接出现在工作区
 
-### 已安装的依赖
+**不需要**：
+- 改动 src/ 的任何代码
+- 学习复杂的框架
+- 写很多新代码（总共约500行）
 
-确保 `src/` 目录可以正常运行：
+---
+
+## 📋 开始前的准备
+
+### 1. 确认环境
+
 ```bash
+# Python 版本
+python --version  # 应该是 3.9+
+
+# Node.js 版本
+node --version  # 应该是 18.0+
+
+# 测试 src/ 能不能跑
 cd src
-pip install -r ../requirements.txt
-python main.py --dataset CodeProjectEval  # 测试是否正常
+python main.py --dataset CodeProjectEval  # 确保没报错
 ```
 
-### 技能要求
+### 2. 需要的工具
 
-- 基础的 Python 和 TypeScript 知识
-- 了解 FastAPI 和 VSCode 扩展开发
-- 理解线程和异步编程
+- VSCode (已安装)
+- Terminal (终端)
+- 文本编辑器 (VSCode 自带)
 
 ---
 
-## 🚀 快速开始（10分钟）
+## 🚀 第一步：创建后台服务器（30分钟）
 
-### 步骤 1: 创建 projectgen-server 目录结构
+### 为什么需要这个？
+
+你的 `src/workflow.py` 执行时会"卡住"，需要一个后台服务器来运行它。
+
+### 1.1 创建目录和文件
 
 ```bash
+# 进入项目根目录
 cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen
-mkdir -p projectgen-server
+
+# 创建服务器目录
+mkdir projectgen-server
 cd projectgen-server
 ```
 
-### 步骤 2: 创建 requirements.txt
+### 1.2 创建依赖文件
 
 ```bash
+# 创建 requirements.txt
 cat > requirements.txt << 'EOF'
 fastapi==0.104.1
 uvicorn==0.24.0
 pydantic==2.4.2
 python-dotenv==1.0.0
 EOF
-```
 
-### 步骤 3: 安装依赖
-
-```bash
+# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 步骤 4: 创建 .env 文件
+等待安装完成（可能需要1-2分钟）。
+
+### 1.3 创建配置文件
 
 ```bash
+# 创建 .env 配置文件
 cat > .env << 'EOF'
 PROJECTGEN_DATASET_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
 PROJECTGEN_OUTPUT_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
@@ -71,531 +91,341 @@ PORT=5000
 EOF
 ```
 
-### 步骤 5: 创建服务器文件
+**注意**：把路径改成你的实际路径！
 
-参考 FINAL_DESIGN_PROPOSAL_REVISED.md 中的代码，创建：
-- `main.py` - FastAPI 服务器主文件
-- `progress_monitor.py` - 进度监控器
+### 1.4 创建服务器主文件 `main.py`
 
-### 步骤 6: 启动服务器
+参考 [design.md](design.md) 中的"第一步"部分的完整代码，创建约150行的 `main.py`。
+
+**核心功能**：
+- 3个 API 接口：`/api/health`, `/api/projects/generate`, `/api/projects/{id}/status`, `/api/projects/{id}/files`
+- 使用线程池后台执行 workflow
+- 监控进度
+
+### 1.5 创建进度监控器 `progress_monitor.py`
+
+参考 [design.md](design.md) 中的"第二步"部分的完整代码，创建约50行的 `progress_monitor.py`。
+
+**核心功能**：
+- 检查 tmp_files/ 目录
+- 判断当前阶段（architecture/skeleton/code）
+
+### 1.6 测试服务器
 
 ```bash
+# 启动服务器
 python main.py
 ```
 
-你应该看到：
+**成功的话会看到**：
 ```
 🚀 ProjectGen Server starting...
-📁 Dataset directory: /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
-📁 Output directory: /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
-🌐 Server running on http://0.0.0.0:5000
-INFO:     Started server process [12345]
-INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+📁 Dataset: /Users/.../datasets
+📁 Output: /Users/.../outputs
+🌐 Server: http://0.0.0.0:5000
+INFO:     Started server process
+INFO:     Uvicorn running on http://0.0.0.0:5000
 ```
 
-### 步骤 7: 测试服务器
-
-在另一个终端：
-
+**在另一个终端测试**：
 ```bash
-# 健康检查
 curl http://localhost:5000/api/health
-
-# 应该返回：
-# {"status":"healthy","active_tasks":0,"total_tasks":0,"timestamp":"..."}
+# 应该返回: {"status":"healthy","active_tasks":0,"total_tasks":0}
 ```
+
+✅ 第一步完成！
 
 ---
 
-## 🔧 完整实施步骤
+## 🎨 第二步：修改 Continue 代码（1小时）
 
-### 方案 A: 修改 Continue 源码（推荐，功能完整）
+### 为什么要改 Continue？
 
-#### 1. Fork 和克隆 Continue
+Continue 本来没有生成项目的功能，我们要加一个新命令。
+
+### 2.1 找到 Continue 目录
 
 ```bash
-# 如果还没有 fork，先在 GitHub 上 fork Continue 仓库
-# https://github.com/continuedev/continue
-
-# 克隆你的 fork
-git clone https://github.com/YOUR_USERNAME/continue.git
-cd continue
-
-# 安装依赖
-npm install
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue
 ```
 
-#### 2. 创建 ProjectGen SlashCommand
+### 2.2 创建命令文件
 
-创建文件 `continue/core/commands/slash/built-in-legacy/projectgen.ts`:
-
-```typescript
-import { SlashCommand } from "../../../index.js";
-
-interface ProjectGenConfig {
-  dataset: string;
-  repo_name: string;
-  model: string;
-}
-
-const ProjectGenSlashCommand: SlashCommand = {
-  name: "projectgen",
-  description: "Generate a project using multi-agent framework",
-  
-  run: async function* ({ ide, input, params }) {
-    const serverUrl = params?.serverUrl || "http://localhost:5000";
-    
-    try {
-      yield "🚀 **ProjectGen** - Multi-Agent Project Generation\n\n";
-      
-      // 解析参数
-      const config = parseInput(input, params);
-      if (!config.repo_name) {
-        yield "❌ Error: Missing required parameter 'repo'\n";
-        yield "Usage: /projectgen repo=<name> [dataset=CodeProjectEval] [model=gpt-4o]\n";
-        return;
-      }
-      
-      yield `📋 Repository: \`${config.repo_name}\`\n`;
-      yield `📦 Dataset: \`${config.dataset}\`\n`;
-      yield `🤖 Model: \`${config.model}\`\n\n`;
-      
-      // 读取 PRD
-      const workspaceDir = ide.getWorkspaceDirectory();
-      const prdPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/PRD.md`;
-      
-      let requirement: string;
-      try {
-        requirement = await ide.readFile(prdPath);
-      } catch (e) {
-        yield `❌ Error: Cannot read PRD file at ${prdPath}\n`;
-        yield `Please ensure the file exists.\n`;
-        return;
-      }
-      
-      // 检查服务器
-      yield "🔌 Checking server connection...\n";
-      const healthCheck = await fetch(`${serverUrl}/api/health`);
-      if (!healthCheck.ok) {
-        yield "❌ Error: ProjectGen server is not running\n";
-        yield `Please start: \`cd projectgen-server && python main.py\`\n`;
-        return;
-      }
-      yield "✅ Server connected\n\n";
-      
-      // 启动生成
-      yield "📤 Starting generation task...\n";
-      const startResponse = await fetch(`${serverUrl}/api/projects/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          dataset: config.dataset,
-          repo_name: config.repo_name,
-          requirement,
-          model: config.model,
-        }),
-      });
-      
-      if (!startResponse.ok) {
-        const error = await startResponse.text();
-        yield `❌ Error: ${error}\n`;
-        return;
-      }
-      
-      const { project_id } = await startResponse.json();
-      yield `🆔 Project ID: \`${project_id}\`\n\n`;
-      yield "📊 **Progress:**\n\n";
-      
-      // 轮询状态
-      let lastProgress = 0;
-      let isComplete = false;
-      
-      while (!isComplete) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        const statusResponse = await fetch(
-          `${serverUrl}/api/projects/${project_id}/status`
-        );
-        const status = await statusResponse.json();
-        
-        if (status.progress > lastProgress) {
-          const bar = generateProgressBar(status.progress);
-          yield `${bar} ${status.progress}% - ${status.current_stage}\n`;
-          lastProgress = status.progress;
-        }
-        
-        if (status.status === "completed") {
-          yield "\n🎉 **Generation Completed!**\n\n";
-          
-          // 应用生成的代码
-          if (status.result?.generated_files) {
-            yield "📝 Applying generated code to workspace...\n";
-            const outputDir = `${workspaceDir}/${config.dataset}_outputs/${config.repo_name}`;
-            
-            for (const file of status.result.generated_files) {
-              const filePath = `${outputDir}/${file.path}`;
-              await ide.writeFile(filePath, file.content);
-            }
-            
-            yield `✅ Applied ${status.result.generated_files.length} files\n`;
-            yield `📁 Output directory: \`${config.dataset}_outputs/${config.repo_name}\`\n\n`;
-            
-            if (status.result.stats) {
-              yield "📊 **Statistics:**\n";
-              yield `- Architecture iterations: ${status.result.stats.arch_iterations}\n`;
-              yield `- Skeleton iterations: ${status.result.stats.skeleton_iterations}\n`;
-              yield `- Code iterations: ${status.result.stats.code_iterations}\n`;
-            }
-          }
-          
-          isComplete = true;
-        } else if (status.status === "failed") {
-          yield `\n❌ **Generation Failed**: ${status.error}\n`;
-          isComplete = true;
-        }
-      }
-      
-    } catch (error: any) {
-      yield `\n❌ **Unexpected Error**: ${error.message}\n`;
-      console.error("ProjectGen error:", error);
-    }
-  }
-};
-
-function parseInput(input: string, params: any): ProjectGenConfig {
-  const config: ProjectGenConfig = {
-    dataset: params?.dataset || "CodeProjectEval",
-    repo_name: "",
-    model: params?.model || "gpt-4o",
-  };
-  
-  const repoMatch = input.match(/repo=(\S+)/);
-  if (repoMatch) config.repo_name = repoMatch[1];
-  
-  const datasetMatch = input.match(/dataset=(\S+)/);
-  if (datasetMatch) config.dataset = datasetMatch[1];
-  
-  const modelMatch = input.match(/model=(\S+)/);
-  if (modelMatch) config.model = modelMatch[1];
-  
-  return config;
-}
-
-function generateProgressBar(progress: number, width: number = 20): string {
-  const filled = Math.floor((progress / 100) * width);
-  const empty = width - filled;
-  return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
-}
-
-export default ProjectGenSlashCommand;
+```bash
+cd core/commands/slash/built-in-legacy
+touch projectgen.ts
 ```
 
-#### 3. 注册 SlashCommand
+**编辑 `projectgen.ts`**，参考 [design.md](design.md) 中"第三步"的完整代码（约300行）。
 
-编辑 `continue/core/commands/slash/built-in-legacy/index.ts`:
+**核心功能**：
+- 解析用户输入 (`/projectgen repo=bplustree`)
+- 读取 PRD.md
+- 调用服务器 API
+- 轮询进度并显示
+- 获取生成的文件并写入工作区
 
+### 2.3 注册命令
+
+**编辑 `continue/core/commands/slash/built-in-legacy/index.ts`**：
+
+在文件**最顶部**（第1行后面）加一行：
 ```typescript
-// 在文件顶部添加导入
 import ProjectGenSlashCommand from "./projectgen.js";
+```
 
-// 在 LegacyBuiltInSlashCommands 数组中添加
+找到 `LegacyBuiltInSlashCommands` 数组，在里面加一个元素：
+```typescript
 const LegacyBuiltInSlashCommands: SlashCommand[] = [
-  CmdSlashCommand,
-  CommitMessageSlashCommand,
-  DraftIssueSlashCommand,
-  HttpSlashCommand,
-  OnboardSlashCommand,
+  DraftIssueCommand,
   ShareSlashCommand,
-  ProjectGenSlashCommand,  // ← 新增这一行
+  GenerateTerminalCommand,
+  HttpSlashCommand,
+  CommitMessageCommand,
+  ReviewMessageCommand,
+  OnboardSlashCommand,
+  ProjectGenSlashCommand,  // ← 加这一行
 ];
 ```
 
-#### 4. 编译和测试
+### 2.4 编译 Continue
 
 ```bash
-# 在 continue 目录下
-cd extensions/vscode
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue/extensions/vscode
 
-# 安装依赖（如果还没有）
+# 第一次需要安装依赖
 npm install
 
 # 编译
 npm run compile
-
-# 在 VSCode 中按 F5 启动调试
-# 这会打开一个新的 VSCode 窗口，Continue 扩展已加载
 ```
 
-#### 5. 使用命令
+**成功的话会看到**：
+```
+Compilation complete. Watching for file changes.
+```
 
-在新打开的 VSCode 窗口中：
-
-1. 打开 Continue Chat 面板（Cmd/Ctrl + L）
-2. 输入命令：
-   ```
-   /projectgen repo=bplustree dataset=CodeProjectEval model=gpt-4o
-   ```
-3. 观察生成进度
+✅ 第二步完成！
 
 ---
 
-### 方案 B: 使用 Continue 的 /http 命令（快速验证）
+## 🧪 第三步：测试完整流程（30分钟）
 
-如果你不想修改 Continue 源码，可以使用内置的 `/http` 命令作为临时方案。
+### 3.1 启动服务器
 
-#### 1. 在 Continue 配置中添加
-
-打开 `~/.continue/config.json`，添加：
-
-```json
-{
-  "slashCommands": [
-    {
-      "name": "projectgen",
-      "description": "Generate project with ProjectGen",
-      "prompt": "http",
-      "params": {
-        "url": "http://localhost:5000/api/chat/projectgen"
-      }
-    }
-  ]
-}
-```
-
-#### 2. 在服务器端添加兼容端点
-
-在 `projectgen-server/main.py` 中添加：
-
-```python
-@app.post("/api/chat/projectgen")
-async def chat_projectgen(request: dict):
-    """
-    兼容 Continue /http 命令的端点
-    """
-    input_text = request.get("input", "")
-    
-    # 解析输入
-    # 格式: repo=bplustree dataset=CodeProjectEval
-    import re
-    repo_match = re.search(r'repo=(\S+)', input_text)
-    dataset_match = re.search(r'dataset=(\S+)', input_text)
-    
-    if not repo_match:
-        return {"response": "Error: Missing repo parameter"}
-    
-    repo_name = repo_match.group(1)
-    dataset = dataset_match.group(1) if dataset_match else "CodeProjectEval"
-    
-    # 启动生成任务
-    gen_request = GenerateRequest(
-        dataset=dataset,
-        repo_name=repo_name,
-        requirement="Generated from chat",
-        model="gpt-4o"
-    )
-    
-    result = await generate_project(gen_request)
-    
-    return {
-        "response": f"Started generation for {repo_name}. Project ID: {result.project_id}"
-    }
-```
-
-#### 3. 使用
-
-在 Continue Chat 中：
-```
-/projectgen repo=bplustree dataset=CodeProjectEval
-```
-
-**注意**：这种方式功能有限，无法显示实时进度。
-
----
-
-## 🧪 测试
-
-### 单元测试
-
+**打开终端1**：
 ```bash
-# 测试服务器
 cd projectgen-server
-pytest tests/  # 需要先创建测试文件
+python main.py
 ```
 
-### 集成测试
+保持这个终端运行。
 
-1. 启动服务器
-2. 在 VSCode 中打开测试项目
-3. 运行 `/projectgen` 命令
-4. 验证：
-   - 进度显示正确
-   - 文件生成到正确位置
-   - 错误处理正常
+### 3.2 启动 VSCode 调试
 
-### 测试清单
+1. 在 VSCode 中打开 `continue` 文件夹
+2. 按 `F5` 键（或点击"Run" → "Start Debugging"）
+3. 会弹出一个新的 VSCode 窗口
 
-- [ ] 服务器启动正常
-- [ ] 健康检查返回正确
-- [ ] 生成任务创建成功
-- [ ] 状态查询正常
-- [ ] WebSocket 连接正常
-- [ ] SlashCommand 注册成功
-- [ ] 命令执行无错误
-- [ ] 进度显示正确
-- [ ] 文件写入成功
-- [ ] 错误处理正确
+### 3.3 在新窗口中测试
+
+1. 在新窗口中，打开你的项目文件夹：
+   ```
+   File → Open Folder → 选择 new-projectgen
+   ```
+
+2. 按 `Cmd+L`（Mac）或 `Ctrl+L`（Windows）打开 Continue Chat
+
+3. 输入命令：
+   ```
+   /projectgen repo=bplustree dataset=CodeProjectEval
+   ```
+
+4. 观察输出！
+
+### 3.4 预期效果
+
+你应该看到类似这样的输出：
+
+```
+🚀 ProjectGen - Multi-Agent Project Generation
+
+📋 Configuration:
+- Repository: `bplustree`
+- Dataset: `CodeProjectEval`
+- Model: `gpt-4o`
+
+📖 Reading PRD...
+✅ PRD loaded (1234 chars)
+
+🔌 Connecting to ProjectGen server...
+✅ Server connected
+
+📤 Starting generation task...
+🆔 Project ID: `abc-123-def`
+
+📊 Workflow:
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│Architecture │ ──> │  Skeleton    │ ──> │    Code      │
+└──────────────┘     └──────────────┘     └──────────────┘
+
+⏳ Progress:
+
+🏗️ Architecture Design
+  - Iteration 1
+[████░░░░░░░░░░░░░░░░] 20%
+
+（... 继续显示进度 ...）
+
+🎉 Generation Completed!
+
+📝 Writing files to workspace...
+  ✓ bplustree.py
+  ✓ node.py
+  ...
+
+📁 Output directory: `CodeProjectEval_outputs/bplustree`
+```
 
 ---
 
-## 🐛 故障排除
+## 🐛 遇到问题？
 
-### 问题 1: 服务器无法启动
+### 问题1：服务器启动失败
 
-**症状**: `python main.py` 报错
+**错误**: `ModuleNotFoundError: No module named 'fastapi'`
 
 **解决**:
 ```bash
-# 检查 Python 版本
-python --version  # 应该 >= 3.9
-
-# 重新安装依赖
-pip install -r requirements.txt --force-reinstall
-
-# 检查端口占用
-lsof -i :5000
+cd projectgen-server
+pip install -r requirements.txt
 ```
 
-### 问题 2: Continue 无法识别命令
+### 问题2：找不到 PRD.md
 
-**症状**: 输入 `/projectgen` 没有反应
+**错误**: `Cannot read PRD file`
 
 **解决**:
-1. 确认已重新编译：`npm run compile`
-2. 重启 VSCode 调试窗口
-3. 检查 `index.ts` 中是否正确导入和注册
-4. 查看 Continue 日志：`Continue: View Logs`
-
-### 问题 3: CORS 错误
-
-**症状**: 浏览器控制台显示 CORS 错误
-
-**解决**:
-在 `main.py` 中确认 CORS 配置：
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 或具体的 VSCode Webview 域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-### 问题 4: 无法读取 PRD 文件
-
-**症状**: 错误信息 "Cannot read PRD file"
-
-**解决**:
-1. 确认文件路径正确
-2. 检查文件权限
-3. 使用绝对路径测试：
-   ```typescript
-   const prdPath = "/absolute/path/to/PRD.md";
-   ```
-
----
-
-## 📦 部署到生产环境
-
-### Docker 部署
-
-创建 `projectgen-server/Dockerfile`:
-
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-
-# 安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 复制代码
-COPY main.py .
-COPY ../src /app/src
-
-# 暴露端口
-EXPOSE 5000
-
-# 启动服务
-CMD ["python", "main.py"]
-```
-
-构建和运行：
-
-```bash
-# 构建镜像
-docker build -t projectgen-server:latest .
-
-# 运行容器
-docker run -p 5000:5000 \
-  -e OPENAI_API_KEY=your_key \
-  projectgen-server:latest
-```
-
-### 发布 VSCode 扩展
-
-1. **Fork Continue 仓库**
-2. **修改扩展名称**（避免冲突）
-   - 编辑 `extensions/vscode/package.json`
-   - 修改 `name`, `displayName`, `publisher`
-3. **打包扩展**
+1. 检查路径是否正确
+2. 确认文件确实存在：
    ```bash
-   cd extensions/vscode
-   npm run package
+   ls datasets/CodeProjectEval/bplustree/PRD.md
    ```
-4. **发布到 Marketplace**
+
+### 问题3：Continue 没有显示命令
+
+**解决**:
+1. 确认编译成功：`npm run compile`
+2. 重启 VSCode 调试窗口（关掉重新按 F5）
+3. 查看 Continue 日志：按 `Cmd+Shift+P`，输入 "Continue: View Logs"
+
+### 问题4：服务器连接失败
+
+**错误**: `Cannot connect to server`
+
+**解决**:
+1. 确认服务器在运行：
    ```bash
-   vsce publish
+   curl http://localhost:5000/api/health
+   ```
+2. 检查端口是否被占用：
+   ```bash
+   lsof -i :5000
+   ```
+
+### 问题5：编译报错
+
+**错误**: TypeScript 编译错误
+
+**解决**:
+1. 确认 Node.js 版本：`node --version` (需要 18.0+)
+2. 重新安装依赖：
+   ```bash
+   cd continue/extensions/vscode
+   rm -rf node_modules
+   npm install
+   npm run compile
    ```
 
 ---
 
-## 📚 下一步
+## ✅ 检查清单
 
-### 功能增强
+完成后确认这些：
 
-1. **WebSocket 实时更新**
-   - 在 GUI 中实现 WebSocket 客户端
-   - 替代当前的轮询机制
-
-2. **记忆查看功能**
-   - 实现 ContextProvider
-   - 显示各阶段的记忆内容
-
-3. **配置管理**
-   - 支持用户自定义服务器地址
-   - 模型选择界面
-
-4. **错误恢复**
-   - 任务失败后重试
-   - 断点续传
-
-### 性能优化
-
-1. 使用 Redis 存储任务状态
-2. 实现任务队列
-3. 添加缓存机制
-4. 优化大文件处理
+- [ ] 服务器能成功启动（端口5000）
+- [ ] 健康检查返回正常（`curl http://localhost:5000/api/health`）
+- [ ] Continue 编译成功
+- [ ] VSCode 调试窗口能打开
+- [ ] 能看到 `/projectgen` 命令
+- [ ] 命令能成功读取 PRD.md
+- [ ] 能看到进度显示
+- [ ] 生成的文件出现在工作区
 
 ---
 
-## 🤝 贡献
+## 📊 总结
 
-欢迎提交 Issue 和 Pull Request！
+你做了什么？
+
+1. **创建了一个轻量级服务器**（150行代码）
+   - 接收请求
+   - 调用 workflow
+   - 返回结果
+
+2. **创建了一个进度监控器**（50行代码）
+   - 查看文件
+   - 判断进度
+
+3. **添加了一个 Continue 命令**（300行代码）
+   - 读取配置
+   - 调用服务器
+   - 显示进度
+   - 写入文件
+
+**总共约500行新代码，src/ 完全不动！**
 
 ---
 
-## 📄 许可证
+## 🎯 核心理念（重要！）
 
-本项目遵循 Apache 2.0 许可证。
+### Continue 只是"壳"
+
+- Continue 提供：聊天界面、文件读写能力
+- ProjectGen (src/) 是核心：所有生成逻辑都在这里
+- 服务器是"中转站"：连接两者
+
+### 数据流向
+
+```
+用户输入 → Continue 读取配置 → 服务器接收请求 
+→ 服务器调用 workflow.py → agents 生成代码 
+→ 保存到 tmp_files/ → 服务器返回结果 
+→ Continue 写入工作区 → 完成！
+```
+
+### 为什么要这样？
+
+1. ✅ **src/ 代码不需要改** - 保持原有逻辑
+2. ✅ **利用 Continue 界面** - 美观易用
+3. ✅ **松耦合** - 服务器、Continue、ProjectGen 可独立测试
+4. ✅ **可扩展** - 以后可以加更多功能
+
+---
+
+## 🎉 完成了！
+
+现在你可以：
+- 在 VSCode 聊天窗口输入 `/projectgen repo=xxx` 生成项目
+- 看到实时进度
+- 生成的代码自动出现在工作区
+
+需要帮助？查看 [PROBLEMS_SUMMARY.md](PROBLEMS_SUMMARY.md) 了解常见问题的解决方案。
+
+---
+
+## 📚 相关文档
+
+- [design.md](design.md) - 完整的设计方案和代码
+- [PROBLEMS_SUMMARY.md](PROBLEMS_SUMMARY.md) - 问题总结和解决方案
+- [FINAL_DESIGN_PROPOSAL.md](FINAL_DESIGN_PROPOSAL.md) - 原始设计文档（已废弃）

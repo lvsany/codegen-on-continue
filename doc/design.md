@@ -1,34 +1,46 @@
-# ProjectGen × Continue 集成方案 - 修订版
+# ProjectGen × Continue "套壳"集成方案
 
-**版本**: 4.0 (基于实际代码修正)  
+**版本**: 5.0 (简化版，易于理解)  
 **日期**: 2026年1月21日  
-**状态**: 待审核
+**核心理念**: Continue 只提供聊天界面，ProjectGen 核心代码(src/)完全不动
 
 ---
 
-## 📊 实际代码分析
+## 💡 核心思想：什么是"套壳"？
 
-### 核心发现
+### 简单来说
 
-#### 1. **workflow.py 是同步执行的**
+想象一下：
+- **Continue** = 一个漂亮的聊天窗口 + 能读写文件的助手
+- **ProjectGen** = 你已经写好的代码生成引擎 (在 src/ 目录里)
+- **我们要做的** = 让 Continue 这个聊天窗口能调用 ProjectGen 引擎
 
+**类比**：就像给一辆车换了个新的仪表盘，但发动机还是原来那个。
+
+### 为什么这样做？
+
+1. ✅ **src/ 目录完全不需要改动** - 你的 workflow.py、agents/ 都保持原样
+2. ✅ **利用 Continue 的界面** - 有现成的聊天窗口、进度显示
+3. ✅ **方便使用** - 在 VSCode 里直接输入命令就能生成项目
+
+---
+
+## 📊 现状分析（关键发现）
+
+### 第一个关键点：workflow 是同步的
+
+**用人话说**：
 ```python
-# src/workflow.py
-def build_graph():
-    builder = StateGraph(dict)
-    # ... 添加节点
-    return builder.compile()
-
-# src/main.py
+# src/main.py 中的代码
 app = build_graph()
-final_state = app.invoke(initial_state, config={"recursion_limit": 50})
-# ⚠️ invoke() 是同步阻塞的，会等待整个工作流完成
+final_state = app.invoke(...)  # 这行会一直等，直到所有工作完成
 ```
 
-**影响**：
-- ❌ 无法直接使用 `asyncio.create_task()` 实现异步
-- ✅ 需要使用线程池来避免阻塞 FastAPI
-- ✅ 可以通过检查文件系统来监控进度
+这个 `invoke()` 会"卡住"，等整个流程跑完才继续。
+
+**为什么重要**？
+- 如果直接在服务器里调用，会导致服务器"假死"
+- 解决办法：开一个后台线程专门跑这个，主线程继续干别的
 
 #### 2. **Agents 已经在保存中间结果**
 
@@ -37,66 +49,42 @@ final_state = app.invoke(initial_state, config={"recursion_limit": 50})
 def save_arch_json(self, repo_dir: str, steps: int, arch_data: dict):
     arch_json_path = f"{repo_dir}/tmp_files/architecture_{steps}.json"
     with open(arch_json_path, "w", encoding="utf-8") as f:
-        json.dump(arch_data, f, ensure_ascii=False, indent=2)
+    第二个关键点：agents 会自动保存进度
 
-# agents/skeleton_agent.py (第148行)
-skeleton_json_path = f"{repo_dir}/tmp_files/skeleton_{steps}.json"
-
-# agents/code_agent.py (第290行)
-code_jsonl_path = f"{repo_dir}/tmp_files/generated_code_{steps}.jsonl"
+**用人话说**：
+你的代码在运行时会自动保存文件：
+```
+tmp_files/
+  ├── architecture_1.json  ← 架构设计第1次迭代
+  ├── architecture_2.json  ← 架构设计第2次迭代
+  ├── skeleton_1.json      ← 骨架代码第1次迭代
+  └── generated_code_1.jsonl ← 最终生成的代码
 ```
 
-**关键洞察**：
-- ✅ 不需要额外的回调机制
-- ✅ 可以通过轮询 `tmp_files/` 目录来监控进度
-- ✅ 最终结果已经保存在文件中，可以直接读取
+**为什么重要**？
+- ✅ 不需要改动原有代码，它已经在保存进度了
+- ✅ 第三个关键点：路径写死了
 
-#### 3. **记忆管理器的实际结构**
-
+**用人话说**：
+代码里有些路径是写死的：
 ```python
-# memory_manager/arch_memory.py
-class FullInputMemory(BaseChatMessageHistory):
-    def __init__(self, max_prompt_history: int = 2):
-        self.full_history: List[Dict] = []
-        self.messages: List[BaseMessage] = []
-    
-    def save_context(self, inputs: Dict, outputs: Dict):
-        # 保存在内存中，没有持久化
-```
-
-**影响**：
-- ⚠️ 记忆只在进程生命周期内有效
-- ⚠️ FastAPI 服务器重启会丢失记忆
-- ✅ 可以通过 `full_history` 导出记忆内容
-
-#### 4. **硬编码的路径问题**
-
-```python
-# workflow.py (第31行)
-code_judge_agent.TEST_BASE_DIR = "/home/zhaoqianhui/workspace/new-projectgen/datasets/"
-
-# main.py (第22行)
+# 这样写在别的电脑上会找不到文件
+code_judge_agent.TEST_BASE_DIR = "/home/zhaoqianhui/workspace/..."
 base_dir = '../datasets'
 ```
 
-**影响**：
-- ⚠️ 在不同环境下会失败
-- ✅ 需要通过环境变量配置
+**怎么解决**？
+- 用环境变量（.env 文件）配置路径
+- 每个人的电脑路径不一样，配置一下就能用
 
-#### 5. **Continue IDE API 的实际接口**
+### 第四个关键点：Continue 提供的能力
 
-```typescript
-// continue/core/index.d.ts
-interface IDE {
-  getWorkspaceDirs(): Promise<string[]>;  // 获取工作区目录
-  readFile(fileUri: string): Promise<string>;  // 读取文件 (URI格式)
-  writeFile(path: string, contents: string): Promise<void>;  // 写入文件
-}
-```
-
----
-
-## 🏗️ 修订后的架构设计
+**用人话说**：
+Continue 能帮我们做这些事：
+- 📖 **读文件**：`ide.readFile(路径)` - 读取 PRD.md
+- ✍️ **写文件**：`ide.writeFile(路径, 内容)` - 把生成的代码写到工作区
+- 📁 **获取工作区**：`ide.getWorkspaceDirs()` - 知道当前项目在哪
+- 💬 **聊天界面**：显示进度、错误信息🏗️ 修订后的架构设计
 
 ### 整体架构
 
@@ -120,45 +108,152 @@ interface IDE {
 │  │  Endpoints:                                            │  │
 │  │  - POST /api/projects/generate                        │  │
 │  │  - GET  /api/projects/{id}/status                     │  │
-│  │  - GET  /api/projects/{id}/files                      │  │
-│  └───────────────────────────────────────────────────────┘  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  ThreadPoolExecutor                                    │  │
-│  │  - 在后台线程中执行 workflow                          │  │
-│  │  - 通过检查文件系统监控进度                          │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                    ↕ 直接调用
-┌─────────────────────────────────────────────────────────────┐
-│  ProjectGen Core (src/) - 完全不修改                        │
-│  - workflow.py: build_graph() + app.invoke()                │
-│  - agents/: 6个智能体 (自动保存到 tmp_files/)              │
-│  - memory_manager/: 记忆管理                                │
-└─────────────────────────────────────────────────────────────┘
+│  │  -整体架构（通俗版）
+
+### 三层结构
+
+```
+第1层：用户界面（Continue 聊天窗口）
+┌─────────────────────────────────────────────────┐
+│  用户在 VSCode 的 Continue Chat 里输入：       │
+│  /projectgen repo=bplustree                     │
+│                                                 │
+│  Continue 做这些事：                            │
+│  1. 读取 datasets/bplustree/PRD.md             │
+│  2. 调用后台服务器启动生成                      │
+│  3. 每隔3秒问一次："生成完了吗？到哪一步了？"   │
+│  4. 生成完后，把代码写到工作区                  │
+└─────────────────────────────────────────────────┘
+         │ (通过 HTTP 通信)
+         ↓
+第2层：后台服务器（新增的 FastAPI 服务器）
+┌─────────────────────────────────────────────────┐
+│  这是一个轻量级的"中转站"：                     │
+│                                                 │
+│  - 接收 Continue 的请求                        │
+│  - 启动一个后台线程运行 workflow               │
+│  - 定期查看 tmp_files/ 目录了解进度            │
+│  - 把进度和结果返回给 Continue                 │
+└─────────────────────────────────────────────────┘
+         │ (直接调用 Python 函数)
+         ↓
+第3层：ProjectGen 核心（你的 src/ 代码，不动！）
+┌─────────────────────────────────────────────────┐
+│  这就是你原来的代码：                           │
+│                                                 │
+│  workflow.py → agents/ → 生成文件              │
+│                                                 │
+│  完全不需要知道"外面有个 Continue"              │
+└─────────────────────────────────────────────────┘
 ```
 
----
-
-## 📁 项目结构
+### 工作文件结构（重要！看这里）
 
 ```
 new-projectgen/
-├── src/                                    # 完全不修改
-│   ├── workflow.py
-│   ├── main.py
-│   └── agents/
 │
-├── projectgen-server/                      # 新增 FastAPI 服务器
-│   ├── main.py                             # 服务器主文件
-│   ├── progress_monitor.py                 # 进度监控器
-│   ├── models.py                           # Pydantic 模型
-│   ├── requirements.txt
-│   └── .env.example                        # 环境变量示例
+├── src/                          ← 【不动】你原来的代码
+│   ├── workflow.py              
+│   ├── main.py                   
+│   ├── agents/                   
+│   ├── memory_manager/           
+│   └── ...                       
 │
-├── continue/                               # 最小修改
+├── projectgen-server/            ← 【新增】中转服务器（很简单）
+│   ├── main.py                   ← 150行左右的代码
+│   ├── progress_monitor.py       ← 50行左右的代码
+│   ├── requirements.txt          ← 4个依赖包
+│   └── .env                      ← 配置文件（设置路径）
+│
+├── continue/                     ← 【小改】只加一个命令
 │   └── core/commands/slash/built-in-legacy/
-│       ├── index.ts                        # 修改：注册命令
-│       └── projectgen.ts                   # 新增：命令实现
+│       ├── index.ts              ← 改1行（注册命令）
+│       └── projectgen.ts         ← 新增（300行左右）
+│
+├── datasets/                     ← 【不动】你的数据集
+│   ├── CodeProjectEval/
+│   └── DevBench/
+│
+└── outputs/                      ← 【自动创建】生成的代码保存在这里
+```
+
+### 新增文件说明
+
+**projectgen-server/main.py**  
+作用：一个轻量级的中转站
+- 提供3个接口：启动任务、查询进度、获取文件
+- 开后台线程调用你的 workflow
+- 不涉及复杂逻辑
+
+**projectgen-server/progress_monitor.py**  
+作用：查看进度的工具函数
+- 检查 tmp_files/ 目录里有哪些文件
+- 判断当前在哪个阶段（architecture/skeleton/code）
+
+**continue/.../projectgen.ts**  
+作用：Continue 的命令实现
+- 读取用户输入
+- 调用服务器接口
+- 显示进度
+- 写入生成的文件
+  "project_id": "abc-123-def",  // 任务编号
+  "status": "pending"
+}
+```
+
+**第4步：服务器启动后台任务**
+```python
+# 服务器在后台开个线程跑这个
+def run_workflow_sync(project_id, initial_state):
+    from workflow import build_graph
+    graph = build_graph()
+    final_state = graph.invoke(initial_state)  # 这行会跑很久
+    # 跑完了，标记为完成
+```
+
+**第5步：Continue 轮询进度**
+```
+每隔3秒，Continue 问服务器：
+GET http://localhost:5000/api/projects/abc-123-def/status
+
+服务器回答：
+{
+  "status": "running",
+  "current_stage": "architecture",  // 当前在做架构设计
+  "iteration": 2,                    // 第2次迭代
+  "progress": 25                     // 完成了25%
+}
+
+Continue 在聊天窗口显示：
+🏗️ Architecture Design
+  - Iteration 1
+  - Iteration 2
+[█████░░░░░░░░░░░░░░░] 25%
+```
+
+**第6步：获取生成的文件**
+```
+任务完成后，Continue 问：
+GET http://localhost:5000/api/projects/abc-123-def/files
+
+服务器回答：
+{
+  "files": [
+    {"path": "bplustree.py", "content": "class BPlusTree:..."},
+    {"path": "node.py", "content": "class Node:..."},
+    ...
+  ]
+}
+```
+
+**第7步：写入工作区**
+```
+Continue 把这些文件写到：
+CodeProjectEval_outputs/bplustree/bplustree.py
+CodeProjectEval_outputs/bplustree/node.py
+...
+
+完成！
 │
 ├── datasets/                               # 保持不变
 │   ├── CodeProjectEval/
@@ -170,9 +265,126 @@ new-projectgen/
 
 ---
 
-## 🔧 核心组件实现
+## 🔧 核心代码（看懂这些就够了）
 
-### 1. FastAPI 服务器 - `projectgen-server/main.py`
+### 1. 后台服务器 - `projectgen-server/main.py`
+
+这个文件做什么？充当"中转站"，接收 Continue 的请求，调用你的 workflow。
+
+**核心代码**（带注释）：
+
+```python
+from fastapi import FastAPI
+from concurrent.futures import ThreadPoolExecutor
+import sys, os, json, uuid
+
+# 把 src/ 加到路径里，这样就能 import workflow 了
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+
+app = FastAPI()
+executor = ThreadPoolExecutor(max_workers=3)  # 最多同时跑3个任务
+
+# 任务记录（简单起见用字典，生产环境可以用数据库）
+tasks = {}
+
+@app.post("/api/projects/generate")
+async def generate_project(request):
+    """启动生成任务 - Continue 会调用这个"""
+    project_id = str(uuid.uuid4())  # 生成任务编号
+    
+    # 准备输入数据（跟你的 main.py 里一样）
+    initial_state = {
+        "user_input": request.requirement,
+        "uml_class": request.uml_class,
+        "arch_design": request.arch_design,
+        "repo_name": request.repo_name,
+        "code_file_DAG": [...],
+        "repo_dir": f"outputs/{request.repo_name}",
+        "dataset": request.dataset
+    }
+    
+    # 记录任务信息
+    tasks[project_id] = {
+        "status": "pending",      # 状态：等待中
+        "current_stage": "architecture",
+        "iteration": 0,
+        "progress": 0,
+        "repo_dir": f"outputs/{request.repo_name}"
+    }
+    
+    # 开个后台线程去跑（不会卡住服务器）
+    executor.submit(run_workflow_sync, project_id, initial_state)
+    
+    return {"project_id": project_id}
+
+
+def run_workflow_sync(project_id, initial_state):
+    """这个函数在后台线程里跑，就是调用你的 workflow"""
+    from workflow import build_graph
+    
+    try:
+        tasks[project_id]["status"] = "running"  # 标记为运行中
+        
+        # 就这一行！调用你的代码
+        graph = build_graph()
+        final_state = graph.invoke(initial_state, config={"recursion_limit": 50})
+        
+        # 跑完了，标记完成
+        tasks[project_id]["status"] = "completed"
+        tasks[project_id]["progress"] = 100
+        
+    except Exception as e:
+        tasks[project_id]["status"] = "failed"
+        tasks[project_id]["error"] = str(e)
+
+
+@app.get("/api/projects/{project_id}/status")
+async def get_status(project_id):
+    """查询进度 - Continue 会每隔3秒调用一次"""
+    task = tasks[project_id]
+    
+    # 如果正在运行，去 tmp_files/ 看看跑到哪了
+    if task["status"] == "running":
+        stage, iteration = detect_current_stage(task["repo_dir"])
+        task["current_stage"] = stage
+        task["iteration"] = iteration
+        task["progress"] = calculate_progress(stage, iteration)
+    
+    return task
+
+
+@app.get("/api/projects/{project_id}/files")
+async def get_files(project_id):
+    """获取生成的文件 - 任务完成后 Continue 调用这个"""
+    repo_dir = tasks[project_id]["repo_dir"]
+    
+    # 读取最新的 generated_code_*.jsonl 文件
+    code_file = f"{repo_dir}/tmp_files/generated_code_final.jsonl"
+    
+    files = []
+    with open(code_file) as f:
+        for line in f:
+            item = json.loads(line)
+            files.append({
+                "path": item["path"],
+                "content": item["code"]
+            })
+    
+    return {"files": files}
+
+
+# 启动服务器
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 服务器启动在 http://localhost:5000")
+    uvicorn.run(app, host="0.0.0.0", port=5000)
+```
+
+**关键点**：
+- 只有 `graph.invoke(...)` 这一行是调用你的代码
+- 其他都是"包装"工作：接收请求、返回结果
+- 总共不到150行代码
 
 ```python
 from fastapi import FastAPI, HTTPException
@@ -424,119 +636,144 @@ if __name__ == "__main__":
 
 ### 2. 进度监控器 - `projectgen-server/progress_monitor.py`
 
+这个文件做什么？通过查看 tmp_files/ 目录里的文件，判断当前进度。
+
+**核心逻辑**（很简单）：
+
 ```python
 import os
-from typing import Tuple
 
-
-def detect_current_stage(repo_dir: str) -> Tuple[str, int]:
-    """
-    通过检查已生成的文件来推断当前阶段和迭代次数
+def detect_current_stage(repo_dir):
+    """看看 tmp_files/ 里有哪些文件，判断跑到哪了"""
+    tmp_dir = f"{repo_dir}/tmp_files"
     
-    Returns:
-        (stage, iteration): 阶段名称和迭代次数
-    """
-    tmp_dir = os.path.join(repo_dir, "tmp_files")
-    
+    # 目录不存在 = 还没开始
     if not os.path.exists(tmp_dir):
         return "architecture", 0
     
-    try:
-        files = os.listdir(tmp_dir)
-    except Exception:
-        return "architecture", 0
+    files = os.listdir(tmp_dir)
     
-    # 检查 code_*.jsonl 文件（最高优先级）
-    code_files = [f for f in files if f.startswith("generated_code_") and f.endswith(".jsonl")]
+    # 如果有 generated_code_*.jsonl = 在跑代码生成
+    code_files = [f for f in files if f.startswith("generated_code_")]
     if code_files:
-        max_step = max([int(f.replace("generated_code_", "").replace(".jsonl", "")) 
+        # 找最大的数字，比如 generated_code_3.jsonl → 第3次迭代
+        max_step = max([int(f.split("_")[-1].replace(".jsonl", "")) 
                        for f in code_files])
         return "code", max_step
     
-    # 检查 skeleton_*.json 文件
-    skeleton_files = [f for f in files if f.startswith("skeleton_") and f.endswith(".json")]
+    # 如果有 skeleton_*.json = 在跑骨架生成
+    skeleton_files = [f for f in files if f.startswith("skeleton_")]
     if skeleton_files:
-        max_step = max([int(f.replace("skeleton_", "").replace(".json", "")) 
+        max_step = max([int(f.split("_")[-1].replace(".json", "")) 
                        for f in skeleton_files])
         return "skeleton", max_step
     
-    # 检查 architecture_*.json 文件
-    arch_files = [f for f in files if f.startswith("architecture_") and f.endswith(".json")]
+    # 如果有 architecture_*.json = 在跑架构设计
+    arch_files = [f for f in files if f.startswith("architecture_")]
     if arch_files:
-        max_step = max([int(f.replace("architecture_", "").replace(".json", "")) 
+        max_step = max([int(f.split("_")[-1].replace(".json", "")) 
                        for f in arch_files])
         return "architecture", max_step
     
     return "architecture", 0
-
-
-class ProgressMonitor:
-    """进度监控器（可选，用于更复杂的进度追踪）"""
-    
-    def __init__(self, repo_dir: str):
-        self.repo_dir = repo_dir
-    
-    def get_stage_info(self) -> dict:
-        """获取详细的阶段信息"""
-        stage, iteration = detect_current_stage(self.repo_dir)
-        
-        return {
-            "stage": stage,
-            "iteration": iteration,
-            "stage_display": self._get_stage_display(stage),
-            "emoji": self._get_stage_emoji(stage)
-        }
-    
-    def _get_stage_display(self, stage: str) -> str:
-        mapping = {
-            "architecture": "Architecture Design",
-            "skeleton": "Skeleton Generation",
-            "code": "Code Implementation"
-        }
-        return mapping.get(stage, stage)
-    
-    def _get_stage_emoji(self, stage: str) -> str:
-        mapping = {
-            "architecture": "🏗️",
-            "skeleton": "🦴",
-            "code": "💻"
-        }
-        return mapping.get(stage, "⚙️")
 ```
 
-### 3. Continue SlashCommand - `continue/core/commands/slash/built-in-legacy/projectgen.ts`
+**理解要点**：
+- 不需要改动 agents/ 的代码
+- 只是"旁观者"，看看文件系统了解进度
+- 总共50行代码
+
+---
+
+### 3. Continue 命令 - `continue/core/commands/slash/built-in-legacy/projectgen.ts`
+
+这个文件做什么？Continue 聊天窗口的命令实现，负责：
+1. 读取 PRD.md
+2. 调用服务器
+3. 显示进度
+4. 写入生成的文件
+
+**核心流程**（分段解释）：
+
+#### 第1部分：读取配置
 
 ```typescript
-import { SlashCommand } from "../../../index.js";
+// 用户输入：/projectgen repo=bplustree dataset=CodeProjectEval
+const config = parseInput(input, params);
 
-interface GeneratedFile {
-  path: string;
-  content: string;
+// 获取工作区路径
+const workspaceDirs = await ide.getWorkspaceDirs();
+const workspaceDir = workspaceDirs[0];  // 比如：/Users/lv.sany/.../new-projectgen
+
+// 读取 PRD.md
+const prdPath = `${workspaceDir}/datasets/${config.dataset}/${config.repo_name}/PRD.md`;
+const requirement = await ide.readFile(prdPath);
+```
+
+#### 第2部分：启动任务
+
+```typescript
+// 发送请求到服务器
+const response = await fetch(`http://localhost:5000/api/projects/generate`, {
+  method: "POST",
+  body: JSON.stringify({
+    repo_name: config.repo_name,
+    requirement: requirement,
+    dataset: config.dataset,
+    model: config.model
+  })
+});
+
+const { project_id } = await response.json();
+// 得到任务编号，比如：abc-123-def
+```
+
+#### 第3部分：轮询进度
+
+```typescript
+// 每隔3秒问一次
+while (!isComplete) {
+  await sleep(3000);  // 等3秒
+  
+  // 问服务器：跑到哪了？
+  const status = await fetch(`http://localhost:5000/api/projects/${project_id}/status`);
+  
+  // 在聊天窗口显示进度
+  if (status.current_stage === "architecture") {
+    yield "🏗️ Architecture Design - Iteration " + status.iteration + "\n";
+  }
+  
+  // 显示进度条
+  yield `[████████░░░░░░░░░░░░] ${status.progress}%\n`;
+  
+  // 如果完成了，跳出循环
+  if (status.status === "completed") {
+    isComplete = true;
+  }
+}
+```
+
+#### 第4部分：获取并写入文件
+
+```typescript
+// 获取生成的文件
+const filesData = await fetch(`http://localhost:5000/api/projects/${project_id}/files`);
+const files = filesData.files;  // [{path: "bplustree.py", content: "..."}, ...]
+
+// 写入到工作区
+for (const file of files) {
+  const fullPath = `${workspaceDir}/CodeProjectEval_outputs/${config.repo_name}/${file.path}`;
+  await ide.writeFile(fullPath, file.content);
+  yield `✓ ${file.path}\n`;
 }
 
-const ProjectGenSlashCommand: SlashCommand = {
-  name: "projectgen",
-  description: "Generate a project using ProjectGen multi-agent framework",
-  
-  run: async function* ({ ide, input, params, fetch }) {
-    const serverUrl = params?.serverUrl || "http://localhost:5000";
-    
-    try {
-      yield "🚀 **ProjectGen** - Multi-Agent Project Generation\n\n";
-      
-      // 1. 解析参数
-      const config = parseInput(input, params);
-      if (!config.repo_name) {
-        yield "❌ Error: Missing required parameter 'repo'\n";
-        yield "Usage: `/projectgen repo=<name> [dataset=CodeProjectEval]`\n";
-        return;
-      }
-      
-      yield `📋 Configuration:\n`;
-      yield `- Repository: \`${config.repo_name}\`\n`;
-      yield `- Dataset: \`${config.dataset}\`\n`;
-      yield `- Model: \`${config.model}\`\n\n`;
-      
+yield "🎉 完成！\n";
+```
+
+**理解要点**：
+- 这个文件就是"界面逻辑"
+- 不涉及代码生成的核心算法
+- 总共300行左右，大部分是显示和格式化
       // 2. 获取工作区目录
       const workspaceDirs = await ide.getWorkspaceDirs();
       if (!workspaceDirs || workspaceDirs.length === 0) {
@@ -772,13 +1009,19 @@ function generateProgressBar(progress: number, width: number = 20): string {
 export default ProjectGenSlashCommand;
 ```
 
-### 4. 注册 SlashCommand - 修改 `continue/core/commands/slash/built-in-legacy/index.ts`
+---
+
+### 4. 注册命令 - 修改 `continue/core/commands/slash/built-in-legacy/index.ts`
+
+这个文件做什么？告诉 Continue："嘿，我们新增了一个 /projectgen 命令"
+
+**只需改1行**：
 
 ```typescript
 // 在文件顶部添加导入
 import ProjectGenSlashCommand from "./projectgen.js";
 
-// 在 LegacyBuiltInSlashCommands 数组中添加
+// 在数组里添加我们的命令
 const LegacyBuiltInSlashCommands: SlashCommand[] = [
   DraftIssueCommand,
   ShareSlashCommand,
@@ -787,91 +1030,181 @@ const LegacyBuiltInSlashCommands: SlashCommand[] = [
   CommitMessageCommand,
   ReviewMessageCommand,
   OnboardSlashCommand,
-  ProjectGenSlashCommand,  // ← 添加这一行
+  ProjectGenSlashCommand,  // ← 加这一行！
 ];
 ```
 
 ---
 
-## 🚀 实施步骤
+## 🚀 实施步骤（手把手教你）
 
-### Phase 1: 创建 FastAPI 服务器（1-2天）
+### 第一步：创建后台服务器（30分钟）
 
-**步骤**：
-1. 创建 `projectgen-server/` 目录
-2. 实现 `main.py`、`progress_monitor.py`、`models.py`
-3. 创建 `requirements.txt`:
-   ```
-   fastapi==0.104.1
-   uvicorn==0.24.0
-   pydantic==2.4.2
-   python-dotenv==1.0.0
-   ```
-4. 创建 `.env.example`:
-   ```
-   PROJECTGEN_DATASET_DIR=/path/to/datasets
-   PROJECTGEN_OUTPUT_DIR=/path/to/outputs
-   PORT=5000
-   ```
-5. 测试服务器：
-   ```bash
-   cd projectgen-server
-   pip install -r requirements.txt
-   python main.py
-   ```
+#### 1.1 创建目录
 
-**测试**：
 ```bash
-# 健康检查
-curl http://localhost:5000/api/health
-
-# 启动生成任务
-curl -X POST http://localhost:5000/api/projects/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dataset": "CodeProjectEval",
-    "repo_name": "bplustree",
-    "requirement": "Test requirement",
-    "model": "gpt-4o"
-  }'
-
-# 查询状态
-curl http://localhost:5000/api/projects/{project_id}/status
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen
+mkdir projectgen-server
+cd projectgen-server
 ```
 
-### Phase 2: 实现 Continue SlashCommand（2-3天）
+#### 1.2 创建 requirements.txt
 
-**步骤**：
-1. 在 `continue/core/commands/slash/built-in-legacy/` 创建 `projectgen.ts`
-2. 修改 `index.ts` 注册命令
-3. 编译 Continue:
-   ```bash
-   cd continue/extensions/vscode
-   npm install
-   npm run compile
-   ```
-4. 在 VSCode 中按 F5 启动调试
+```bash
+cat > requirements.txt << 'EOF'
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.4.2
+python-dotenv==1.0.0
+EOF
+```
 
-**测试**：
-1. 打开新的 VSCode 窗口（Extension Development Host）
-2. 打开 Continue Chat 面板（Cmd/Ctrl + L）
-3. 输入：`/projectgen repo=bplustree dataset=CodeProjectEval`
-4. 观察输出
+#### 1.3 安装依赖
 
-### Phase 3: 端到端测试（1-2天）
+```bash
+pip install -r requirements.txt
+```
 
-**测试场景**：
-1. ✅ 正常流程：architecture → skeleton → code
-2. ✅ 迭代场景：多次迭代优化
-3. ✅ 错误处理：服务器未启动、repo 不存在
-4. ✅ 文件写入：生成的代码正确应用到工作区
-5. ✅ 多任务：并发执行多个生成任务
+#### 1.4 创建 .env 配置文件
+
+```bash
+cat > .env << 'EOF'
+PROJECTGEN_DATASET_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/datasets
+PROJECTGEN_OUTPUT_DIR=/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/outputs
+PORT=5000
+EOF
+```
+
+说明：这两个路径根据你的实际路径修改。
+
+#### 1.5 创建 main.py
+
+**完整代码见附录A**（约150行）
+
+要点：
+- 导入 workflow
+- 提供3个 API 接口
+- 使用线程池执行 workflow
+
+#### 1.6 创建 progress_monitor.py
+
+**完整代码见附录B**（约50行）
+
+要点：
+- 检查 tmp_files/ 目录
+- 判断当前阶段
+
+#### 1.7 测试服务器
+
+```bash
+python main.py
+```
+
+看到这个说明成功了：
+```
+🚀 ProjectGen Server starting...
+📁 Dataset directory: /Users/.../datasets
+📁 Output directory: /Users/.../outputs
+🌐 Server running on http://0.0.0.0:5000
+```
 
 ---
 
-## 📊 预期效果
+### 第二步：修改 Continue 代码（1小时）
 
-### Continue Chat 中的显示
+#### 2.1 找到 Continue 目录
+
+```bash
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue
+```
+
+#### 2.2 创建 projectgen.ts
+
+```bash
+cd core/commands/slash/built-in-legacy
+touch projectgen.ts
+```
+
+**完整代码见附录C**（约300行）
+
+要点：
+- 解析用户输入
+- 读取 PRD.md
+- 调用服务器接口
+- 显示进度
+- 写入文件
+
+#### 2.3 修改 index.ts
+
+找到文件：`continue/core/commands/slash/built-in-legacy/index.ts`
+
+在**第1行**后面加一行：
+```typescript
+import ProjectGenSlashCommand from "./projectgen.js";
+```
+
+在数组里加一个元素（找到 `LegacyBuiltInSlashCommands` 数组）：
+```typescript
+const LegacyBuiltInSlashCommands: SlashCommand[] = [
+  DraftIssueCommand,
+  ShareSlashCommand,
+  GenerateTerminalCommand,
+  HttpSlashCommand,
+  CommitMessageCommand,
+  ReviewMessageCommand,
+  OnboardSlashCommand,
+  ProjectGenSlashCommand,  // ← 加这一行
+];
+```
+
+#### 2.4 编译 Continue
+
+```bash
+cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/new-projectgen/continue/extensions/vscode
+npm install  # 第一次需要
+npm run compile
+```
+
+编译成功会显示：
+```
+Compilation complete. Watching for file changes.
+```
+
+---
+
+### 第三步：测试完整流程（30分钟）
+
+#### 3.1 启动服务器
+
+在一个终端：
+```bash
+cd projectgen-server
+python main.py
+```
+
+#### 3.2 启动 VSCode 调试
+
+1. 在 VSCode 中打开 `continue` 文件夹
+2. 按 `F5` 键（或者点击"Run" → "Start Debugging"）
+3. 会弹出一个新的 VSCode 窗口（这就是调试窗口）
+
+#### 3.3 使用命令
+
+在新的 VSCode 窗口中：
+
+1. 打开你的项目文件夹（new-projectgen）
+2. 按 `Cmd+L`（Mac）或 `Ctrl+L`（Windows）打开 Continue Chat
+3. 输入命令：
+   ```
+   /projectgen repo=bplustree dataset=CodeProjectEval
+   ```
+4. 观察输出！
+
+---
+
+### 第四步：预期效果
+
+你会看到这样的输出：
 
 ```
 🚀 ProjectGen - Multi-Agent Project Generation
@@ -888,33 +1221,29 @@ curl http://localhost:5000/api/projects/{project_id}/status
 ✅ Server connected
 
 📤 Starting generation task...
-🆔 Project ID: `abc-123-def-456`
+🆔 Project ID: `abc-123-def`
 
 📊 Workflow:
-
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │Architecture │ ──> │  Skeleton    │ ──> │    Code      │
 │   Design     │     │ Generation   │     │ Filling      │
 └──────────────┘     └──────────────┘     └──────────────┘
-     ↓ Judge             ↓ Judge             ↓ Judge
-   (Iterate)            (Iterate)           (Iterate)
 
 ⏳ Progress:
 
 🏗️ Architecture Design
   - Iteration 1
   - Iteration 2
-[████████████████████] 20%
+[████████░░░░░░░░░░░░] 20%
 
 🦴 Skeleton Generation
   - Iteration 1
-[████████████████████████████] 50%
+[████████████████░░░░] 50%
 
 💻 Code Implementation
   - Iteration 1
   - Iteration 2
-  - Iteration 3
-[████████████████████████████████████████] 100%
+[████████████████████] 100%
 
 🎉 Generation Completed!
 
@@ -932,43 +1261,46 @@ curl http://localhost:5000/api/projects/{project_id}/status
 📊 Statistics:
 - Architecture iterations: 2
 - Skeleton iterations: 1
-- Code iterations: 3
+- Code iterations: 2
 - Total files: 8
 ```
 
 ---
 
-## ⚠️ 已解决的问题
+## 📊 总结：你需要写多少代码？
 
-### ✅ 问题1: workflow 同步阻塞
-**解决方案**: 使用 `ThreadPoolExecutor` 在后台线程执行
-
-### ✅ 问题2: 无法监听进度
-**解决方案**: 通过检查 `tmp_files/` 目录中的文件来推断进度
-
-### ✅ 问题3: 文件访问路径
-**解决方案**: 使用环境变量配置基础路径
-
-### ✅ 问题4: 记忆管理
-**解决方案**: 记忆保存在内存中，FastAPI 进程内可访问（可选功能）
-
-### ✅ 问题5: Continue IDE API
-**解决方案**: 使用 `getWorkspaceDirs()` 获取工作区，`readFile/writeFile` 处理文件
+| 文件 | 行数 | 难度 | 说明 |
+|------|------|------|------|
+| `projectgen-server/main.py` | ~150行 | ⭐⭐ | 主要是API接口定义 |
+| `projectgen-server/progress_monitor.py` | ~50行 | ⭐ | 很简单的文件查找 |
+| `continue/.../projectgen.ts` | ~300行 | ⭐⭐⭐ | TypeScript，需要理解异步 |
+| `continue/.../index.ts` | 修改2行 | ⭐ | 只是注册命令 |
+| **总计** | **~500行新代码** | - | src/ 完全不动！ |
 
 ---
 
-## 🎯 下一步行动
+## 🎯 关键理念再强调
 
-**立即开始**：
-1. 确认设计方案是否符合需求
-2. 创建 `projectgen-server/` 目录结构
-3. 实现基础的 FastAPI 服务器
-4. 进行端到端测试
+### 你的 src/ 代码：
 
-**需要确认的问题**：
-1. ✅ 输出目录是否使用 `outputs/` 而不是 `{dataset}_outputs/`？
-2. ✅ 是否需要支持取消正在运行的任务？
-3. ✅ 是否需要持久化任务历史（使用 SQLite/Redis）？
-4. ✅ 是否需要实现记忆查看功能？
+```
+不需要改！
+不需要改！！
+不需要改！！！
+```
 
-准备好开始实施了吗？
+### 新增的代码只做3件事：
+
+1. **服务器（main.py）**：接收请求 → 调用 workflow → 返回结果
+2. **进度监控（progress_monitor.py）**：看文件 → 判断进度
+3. **Continue 命令（projectgen.ts）**：读PRD → 调服务器 → 显示进度 → 写文件
+
+### 这就是"套壳"：
+
+- **壳**：Continue 的聊天界面 + 文件操作能力
+- **核心**：你的 workflow.py、agents/ 等代码
+- **中转站**：一个轻量级的 FastAPI 服务器
+
+---
+
+## 附录
