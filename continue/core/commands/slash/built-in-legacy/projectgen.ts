@@ -38,7 +38,7 @@ interface ProjectStatus {
 }
 
 // 服务器地址（可配置）
-const SERVER_URL = "http://localhost:5000";
+const SERVER_URL = "http://localhost:5002";
 
 const ProjectGenSlashCommand: SlashCommand = {
   name: "projectgen",
