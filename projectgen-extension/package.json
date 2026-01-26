@@ -1,0 +1,81 @@
+{
+  "name": "projectgen",
+  "displayName": "ProjectGen - AI Code Generation",
+  "description": "Multi-agent repository-level code generation assistant",
+  "version": "0.1.0",
+  "publisher": "projectgen",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.80.0",
+    "node": ">=20.0.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "ai",
+    "code generation",
+    "multi-agent",
+    "repository",
+    "project"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:projectgen.chatView"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "projectgen",
+          "title": "ProjectGen",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "projectgen": [
+        {
+          "type": "webview",
+          "id": "projectgen.chatView",
+          "name": "Chat",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "projectgen.focusChat",
+        "title": "ProjectGen: Focus Chat",
+        "category": "ProjectGen"
+      },
+      {
+        "command": "projectgen.newSession",
+        "title": "ProjectGen: New Session",
+        "category": "ProjectGen"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "projectgen.focusChat",
+        "key": "cmd+shift+p",
+        "mac": "cmd+shift+p",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.30",
+    "@types/vscode": "^1.108.1",
+    "typescript": "^5.9.3"
+  }
+}

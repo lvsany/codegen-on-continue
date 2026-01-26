@@ -4,7 +4,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain.memory import ConversationBufferMemory
-from langchain.memory.chat_message_histories import ChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from prompts import *

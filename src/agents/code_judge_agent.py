@@ -3,7 +3,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from langchain.memory import ConversationBufferMemory
-from langchain.memory.chat_message_histories import ChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda
@@ -24,7 +24,7 @@ from datetime import datetime
 
 class CodeJudgeAgent:
     MAX_CODE_ITER = 5
-    TEST_BASE_DIR = "/home/zhaoqianhui/workspace/new-projectgen/datasets/"
+    TEST_BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'datasets') + os.sep
 
     def __init__(self, llm, secondery_llm):
         self.base_llm = llm

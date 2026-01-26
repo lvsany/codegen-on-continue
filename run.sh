@@ -1,12 +1,9 @@
 #!/bin/bash
 
 # python版本为3.9，请在执行之前先确保版本正确
-# 检查并切换 Node.js 版本20.19.0
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
-
-
 
 # 设置端口
 PORT=5002
@@ -14,9 +11,11 @@ PORT=5002
 # 更新 projectgen-server/.env 中的 PORT
 sed -i '' "s/^PORT=.*/PORT=$PORT/" "$PROJECT_ROOT/projectgen-server/.env"
 
-# 更新 projectgen.ts 中的 SERVER_URL
-TS_FILE="$PROJECT_ROOT/continue/core/commands/slash/built-in-legacy/projectgen.ts"
-sed -i '' "s|const SERVER_URL = \"http://localhost:[0-9]*\"|const SERVER_URL = \"http://localhost:$PORT\"|g" "$TS_FILE"
+# 更新 projectgen-extension 中的 SERVER_URL
+PANEL_FILE="$PROJECT_ROOT/projectgen-extension/src/panel.ts"
+if [ -f "$PANEL_FILE" ]; then
+    sed -i '' "s|const SERVER_URL = 'http://localhost:[0-9]*'|const SERVER_URL = 'http://localhost:$PORT'|g" "$PANEL_FILE"
+fi
 
 # 先启动后端
 cd "$PROJECT_ROOT/projectgen-server"
@@ -40,27 +39,28 @@ else
     exit 1
 fi
 
-# 提示启动 Continue
+# 提示启动扩展
 echo ""
-echo "启动步骤 2/2: 启动 Continue 扩展"
+echo "启动步骤 2/2: 启动 ProjectGen 扩展"
 echo "--------------------------------------"
 echo ""
 echo "请在 VS Code 中完成以下步骤："
 echo ""
-echo "1. 打开 continue 文件夹"
-echo "   cd $PROJECT_ROOT/continue"
+echo "1. 打开 projectgen-extension 文件夹"
+echo "   cd $PROJECT_ROOT/projectgen-extension"
 echo "   code ."
 echo ""
-echo "2. 如果是首次运行，需要先安装依赖："
-echo "./scripts/install-dependencies.sh"
+echo "2. 按 F5 启动调试"
 echo ""
-echo "3. 按 F5 启动调试"
+echo "3. 在新窗口中按 Cmd+Shift+P"
 echo ""
-echo "4. 在新窗口中打开工作区"
+echo "4. 输入并选择："
+echo "   ProjectGen: Generate Project"
 echo ""
-echo "5. 使用命令："
-echo "   /projectgen repo=bplustree"
-echo "   /projectgen project=datasets"
+echo "5. 在打开的界面中输入参数："
+echo "   - Repository: bplustree"
+echo "   - Dataset: CodeProjectEval"
+echo "   或使用 Project Path: datasets"
 echo ""
 echo "======================================"
 echo ""

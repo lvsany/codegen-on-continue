@@ -125,7 +125,7 @@ def compute_stage_elapsed(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    log_file = '/home/zhaoqianhui/workspace/new-projectgen/DevBench_outputs/gpt-4o/agent_metrics.log'
+    log_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'DevBench_outputs/gpt-4o/agent_metrics.log')
     items = iter_json_objects_from_file(log_file)
     summary = summarize(items)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
