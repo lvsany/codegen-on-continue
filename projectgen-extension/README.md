@@ -1,23 +1,26 @@
-# ProjectGen - 类 Continue 插件使用指南
+# ProjectGen - 简化版 VS Code 扩展
+
+## 简介
+
+ProjectGen 是一个**轻量级的 AI 代码生成扩展**，完全不依赖 Continue。
+
+特点：
+- ✅ **纯原生实现**：使用原生 HTML/CSS/JavaScript
+- ✅ **无需构建**：直接加载，无需 React/Vite
+- ✅ **侧边栏集成**：在 VS Code 左侧活动栏有独立图标
+- ✅ **简洁聊天界面**：美观的对话式交互
+- ✅ **仓库级代码生成**：支持完整项目生成
 
 ## 架构说明
-
-ProjectGen 现在是一个完全类似 Continue 的 VSCode 扩展：
-
-- ✅ **侧边栏集成**: 在 VSCode 左侧活动栏有独立图标
-- ✅ **聊天界面**: 复用 Continue 的完整 GUI 和样式系统  
-- ✅ **无账号功能**: 精简版，专注于代码生成
-- ✅ **仓库级代码生成**: 核心功能
-
-## 文件结构
 
 ```
 projectgen-extension/
 ├── src/
 │   ├── extension.ts                      # 扩展入口
-│   ├── ProjectGenWebviewViewProvider.ts  # 侧边栏视图提供者
-│   └── panel.ts                          # (旧文件，可删除)
-├── gui/                                  # 符号链接到 continue/gui
+│   └── ProjectGenWebviewViewProvider.ts  # 侧边栏视图提供者
+├── webview/
+│   ├── index.html                        # 聊天界面（自包含，含CSS/JS）
+│   └── README.md                         # 前端文档
 ├── media/
 │   └── icon.svg                          # 侧边栏图标
 ├── package.json                          # 扩展配置
@@ -29,91 +32,179 @@ projectgen-extension/
 ### 1. 启动后端服务器
 
 ```bash
-cd /Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue
+cd /path/to/codegen-on-continue
 ./run.sh
 ```
 
 服务器将在 http://localhost:5002 运行
 
-### 2. 启动扩展（开发模式）
+### 2. 编译扩展
 
 ```bash
 cd projectgen-extension
-code .
+npm install
+npm run compile
 ```
 
-在新打开的 VSCode 窗口中按 **F5**
+### 3. 启动扩展（开发模式）
 
-### 3. 使用扩展
+在 VS Code 中：
+1. 打开 `projectgen-extension` 文件夹
+2. 按 **F5** 启动调试
+3. 会打开一个新的 VS Code 窗口（扩展开发主机）
 
-在扩展开发窗口中（标题显示 `[Extension Development Host]`）：
+### 4. 使用扩展
 
-1. 点击左侧活动栏的 **P** 图标（ProjectGen）
-2. 侧边栏会打开，显示类似 Continue 的聊天界面
-3. 在聊天框输入代码生成请求
+在扩展开发窗口中：
+
+1. 点击左侧活动栏的 **ProjectGen** 图标
+2. 侧边栏会打开，显示聊天界面
+3. 输入项目需求，点击"发送"按钮
 
 或使用快捷键：
-- **Cmd+Shift+P** (macOS) 打开聊天窗口
+- **Cmd+Shift+P** (macOS) / **Ctrl+Shift+P** (Windows/Linux)
+- 输入 "ProjectGen: Focus Chat"
 
-## 开发模式说明
+## 使用示例
 
-### 使用 Continue GUI（开发模式）
+### 示例 1: 生成 TODO 应用
 
-扩展会自动连接到 Continue 的 Vite 开发服务器：
-
-```bash
-# 在 continue/gui 目录启动开发服务器
-cd continue/gui
-npm run dev
+在聊天框输入：
+```
+生成一个简单的 TODO 应用，使用 Python Flask 后端和 HTML 前端
 ```
 
-GUI 将在 http://localhost:5173 运行，支持热重载。
+### 示例 2: 生成 API 项目
 
-### 生产模式
-
-生产模式需要构建 Continue GUI：
-
-```bash
-cd continue/gui
-npm run build
+在聊天框输入：
+```
+创建一个用户管理 RESTful API，包含注册、登录、用户列表功能
 ```
 
-构建产物在 `continue/gui/assets/`，扩展会自动加载。
+扩展会：
+1. 将需求发送到后端服务器
+2. 显示进度信息
+3. 生成完成后显示结果
 
-## 与原版 Continue 的区别
+## 界面功能
 
-| 功能 | Continue | ProjectGen |
-|------|----------|------------|
-| 侧边栏图标 | Continue 图标 | P 图标 |
-| 账号登录 | ✅ | ❌ |
-| 多模型支持 | ✅ | ❌ |
-| 代码补全 | ✅ | ❌ |
-| 代码编辑 | ✅ | ❌ |
-| 仓库生成 | ❌ | ✅ |
-| 聊天界面 | ✅ | ✅ (复用) |
+### 聊天界面
 
-## 后续开发
+- **用户消息**：蓝色背景，右对齐
+- **助手消息**：灰色背景，左对齐  
+- **错误消息**：红色边框
+- **进度提示**：蓝色边框
 
-如果需要自定义 GUI，修改 `continue/gui/src/` 下的文件即可：
+### 快捷操作
 
-- `pages/gui/Chat.tsx` - 主聊天界面
-- `components/` - UI 组件
-- `redux/` - 状态管理
+- **清空对话**：清除所有聊天记录
+- **新会话**：开始新的对话会话
 
-所有修改会在开发模式下自动热重载。
+### 预设模板
+
+点击建议的项目模板可快速填充需求：
+- 📝 TODO 应用
+- 🌐 RESTful API
+- ⚛️ React 前端项目
+
+## 技术架构
+
+### 前端（webview/index.html）
+
+- 纯 HTML/CSS/JavaScript 实现
+- 使用 VS Code CSS 变量自动适配主题
+- 无需构建步骤，即时加载
+
+### 后端通信
+
+扩展通过 HTTP POST 与 ProjectGen 服务器通信：
+
+```typescript
+POST http://localhost:5002/api/projects/generate
+{
+    "requirement": "用户输入的需求",
+    "workspace_root": "/当前工作区路径"
+}
+```
+
+服务器返回：
+```json
+{
+    "output_dir": "/生成的项目路径",
+    "message": "成功消息",
+    "error": "错误消息（如有）"
+}
+```
+
+## 自定义界面
+
+直接编辑 `webview/index.html` 即可自定义界面。
+
+### 修改样式
+
+所有样式都使用 VS Code 主题变量：
+
+```css
+background: var(--vscode-editor-background);
+color: var(--vscode-editor-foreground);
+```
+
+### 添加功能
+
+在 `<script>` 标签中添加 JavaScript 代码：
+
+```javascript
+// 添加新的消息处理
+window.addEventListener('message', event => {
+    const message = event.data;
+    // 处理自定义消息类型
+});
+```
+
+## 对比 Continue 集成方案
+
+| 方面 | 简化版 | Continue 集成 |
+|------|--------|---------------|
+| **依赖** | 无外部依赖 | 依赖 Continue 扩展 |
+| **构建** | 无需构建 | 需要 Vite + React |
+| **文件大小** | < 20KB | > 1MB |
+| **启动速度** | 即时 | 需加载 React |
+| **维护成本** | 低 | 需同步 Continue 更新 |
+| **自定义性** | 完全控制 | 受限于 Continue API |
+| **学习曲线** | HTML/CSS/JS | React + TypeScript |
 
 ## 故障排查
 
-### 侧边栏不显示
+### 界面不显示
 
-检查 package.json 中的 `viewsContainers` 和 `views` 配置。
+- 检查 `webview/index.html` 是否存在
+- 查看 VS Code 开发者工具（Help > Toggle Developer Tools）
+- 检查控制台错误信息
 
-### GUI 加载失败
+### 无法连接后端
 
-1. 确保 Continue GUI 开发服务器在运行（`npm run dev`）
-2. 检查 Console 输出的错误信息
-3. 验证符号链接：`ls -la gui`
+- 确保后端服务器在运行：`curl http://localhost:5002`
+- 检查防火墙设置
+- 查看后端日志文件
 
-### 样式不正确
+### 编译错误
+
+```bash
+# 清理并重新安装依赖
+rm -rf node_modules out
+npm install
+npm run compile
+```
+
+## 扩展功能建议
+
+可以考虑添加：
+
+1. **Markdown 渲染**：渲染富文本消息
+2. **代码高亮**：语法高亮代码块
+3. **历史记录**：保存对话历史
+4. **导出功能**：导出对话为文件
+5. **进度条**：显示详细的生成进度
+6. **文件预览**：预览生成的文件内容
 
 确保 `window.ide = "vscode"` 已在 HTML 中设置，Continue GUI 会据此加载 VSCode 主题。

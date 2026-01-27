@@ -177,39 +177,102 @@ async def get_project_status(project_id: str):
 
 
 @app.get("/api/projects/{project_id}/files")
-async def get_generated_files(project_id: str):
+async def get_generated_files(project_id: str, include_content: bool = True):
     if project_id not in tasks:
         raise HTTPException(404, "Project not found")
     
     task = tasks[project_id]
-    
-    if task["status"] != "completed":
-        raise HTTPException(400, "Project not completed yet")
-    
     repo_dir = task["repo_dir"]
     tmp_dir = os.path.join(repo_dir, "tmp_files")
     
-    files = []
-    code_files = [f for f in os.listdir(tmp_dir) if f.startswith("generated_code_")]
-    if not code_files:
-        return {"files": []}
+    all_files = []
     
-    latest_code_file = sorted(code_files)[-1]
-    code_jsonl_path = os.path.join(tmp_dir, latest_code_file)
+    # 检查 tmp_files 目录是否存在
+    if not os.path.exists(tmp_dir):
+        print(f"[ProjectGen] tmp_dir not exists: {tmp_dir}")
+        return {
+            "project_id": project_id,
+            "repo_name": task["repo_name"],
+            "files": [],
+            "total_files": 0,
+            "status": task["status"]
+        }
     
-    with open(code_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            item = json.loads(line)
-            files.append({
-                "path": item.get("path", ""),
-                "content": item.get("content", "")
-            })
+    try:
+        # 1. 获取架构文件 (支持 arch_step_* 和 architecture_* 两种命名)
+        arch_files = sorted([f for f in os.listdir(tmp_dir) if f.startswith("arch_step_") or f.startswith("architecture_")])
+        print(f"[ProjectGen] 找到 {len(arch_files)} 个架构文件")
+        for arch_file in arch_files:
+            file_path = os.path.join(tmp_dir, arch_file)
+            if os.path.exists(file_path):
+                file_info = {"path": f"tmp_files/{arch_file}"}
+                if include_content:
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            file_info["content"] = f.read()
+                    except Exception as e:
+                        print(f"[ProjectGen] 读取文件失败 {arch_file}: {e}")
+                        file_info["content"] = ""
+                all_files.append(file_info)
+        
+        # 2. 获取骨架文件 (支持 skeleton_step_* 和 skeleton_* 两种命名)
+        skeleton_files = sorted([f for f in os.listdir(tmp_dir) if f.startswith("skeleton_step_") or (f.startswith("skeleton_") and not f.startswith("skeleton_step_"))])
+        print(f"[ProjectGen] 找到 {len(skeleton_files)} 个骨架文件")
+        for skeleton_file in skeleton_files:
+            file_path = os.path.join(tmp_dir, skeleton_file)
+            if os.path.exists(file_path):
+                file_info = {"path": f"tmp_files/{skeleton_file}"}
+                if include_content:
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            file_info["content"] = f.read()
+                    except Exception as e:
+                        print(f"[ProjectGen] 读取文件失败 {skeleton_file}: {e}")
+                        file_info["content"] = ""
+                all_files.append(file_info)
+        
+        # 3. 获取生成的代码文件
+        code_files = sorted([f for f in os.listdir(tmp_dir) if f.startswith("generated_code_")])
+        print(f"[ProjectGen] 找到 {len(code_files)} 个代码文件")
+        if code_files:
+            # 使用最新的代码文件
+            latest_code_file = code_files[-1]
+            code_jsonl_path = os.path.join(tmp_dir, latest_code_file)
+            
+            if os.path.exists(code_jsonl_path):
+                try:
+                    with open(code_jsonl_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                item = json.loads(line)
+                                file_info = {"path": item.get("path", "")}
+                                if include_content:
+                                    file_info["content"] = item.get("content", "")
+                                all_files.append(file_info)
+                            except json.JSONDecodeError as e:
+                                print(f"[ProjectGen] JSON解析失败: {e}")
+                                continue
+                except Exception as e:
+                    print(f"[ProjectGen] 读取代码文件失败: {e}")
+        
+        print(f"[ProjectGen] 总共返回 {len(all_files)} 个文件")
+        
+    except Exception as e:
+        print(f"[ProjectGen] 获取文件列表失败: {e}")
+        return {
+            "project_id": project_id,
+            "repo_name": task["repo_name"],
+            "files": [],
+            "total_files": 0,
+            "status": task["status"]
+        }
     
     return {
         "project_id": project_id,
         "repo_name": task["repo_name"],
-        "files": files,
-        "total_files": len(files)
+        "files": all_files,
+        "total_files": len(all_files),
+        "status": task["status"]
     }
 
 
