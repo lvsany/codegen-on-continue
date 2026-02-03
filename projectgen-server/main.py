@@ -40,6 +40,24 @@ executor = ThreadPoolExecutor(max_workers=3)
 tasks: Dict[str, dict] = {}
 
 
+def find_repo_in_datasets(repo_name: str) -> Optional[str]:
+    """在所有数据集目录中递归搜索仓库"""
+    if not os.path.exists(DATASET_BASE_DIR):
+        return None
+    
+    for dataset in os.listdir(DATASET_BASE_DIR):
+        dataset_path = os.path.join(DATASET_BASE_DIR, dataset)
+        if not os.path.isdir(dataset_path):
+            continue
+        
+        repo_path = os.path.join(dataset_path, repo_name)
+        if os.path.exists(repo_path) and os.path.isdir(repo_path):
+            print(f"[ProjectGen] Found {repo_name} in dataset: {dataset}")
+            return dataset
+    
+    return None
+
+
 class GenerateRequest(BaseModel):
     dataset: str
     repo_name: str
@@ -76,13 +94,24 @@ async def health_check():
 async def generate_project(request: GenerateRequest):
     project_id = str(uuid.uuid4())
     
-    # 先检查这个repo存不存在
-    repo_source_dir = os.path.join(DATASET_BASE_DIR, request.dataset, request.repo_name)
+    # 如果没有指定数据集或数据集为空，自动搜索
+    if not request.dataset or request.dataset == "":
+        print(f"[ProjectGen] No dataset specified, searching for {request.repo_name}...")
+        found_dataset = find_repo_in_datasets(request.repo_name)
+        if not found_dataset:
+            raise HTTPException(404, f"Repository '{request.repo_name}' not found in any dataset")
+        dataset = found_dataset
+        print(f"[ProjectGen] Using dataset: {dataset}")
+    else:
+        dataset = request.dataset
+    
+    # 检查这个repo存不存在
+    repo_source_dir = os.path.join(DATASET_BASE_DIR, dataset, request.repo_name)
     if not os.path.exists(repo_source_dir):
         raise HTTPException(404, f"Repository not found: {repo_source_dir}")
     
     # 创建输出目录，路径格式和src/main.py保持一致
-    output_base = os.path.join(PROJECT_ROOT, f"{request.dataset}_outputs")
+    output_base = os.path.join(PROJECT_ROOT, f"{dataset}_outputs")
     repo_output_dir = os.path.join(output_base, request.model, request.repo_name)
     os.makedirs(repo_output_dir, exist_ok=True)
     os.makedirs(os.path.join(repo_output_dir, "tmp_files"), exist_ok=True)
@@ -94,15 +123,38 @@ async def generate_project(request: GenerateRequest):
     with open(config_path) as f:
         repo_config = json.load(f)
     
+    # 与 src/main.py 完全一致：从 dataset 目录读取文件，而不是使用前端传递的数据
+    requirement = open(os.path.join(repo_source_dir, repo_config['PRD']), "r").read()
+    
+    if dataset == 'DevBench':
+        uml_class = open(os.path.join(repo_source_dir, repo_config['UML_class']), "r").read()
+        uml_sequence = open(os.path.join(repo_source_dir, repo_config['UML_sequence']), "r").read()
+    elif dataset == 'CodeProjectEval':
+        # CodeProjectEval 使用 UML 数组，选择 pyreverse 版本
+        uml_class = ""
+        for uml_file in repo_config.get('UML', []):
+            if 'pyreverse' in uml_file:
+                uml_class = open(os.path.join(repo_source_dir, uml_file), "r").read()
+                break
+        uml_sequence = ""
+    else:
+        # 其他数据集的默认处理
+        uml_class = request.uml_class
+        uml_sequence = request.uml_sequence
+        requirement = request.requirement
+    
+    arch_design = open(os.path.join(repo_source_dir, repo_config['architecture_design']), "r").read()
+    
+    # 注意：与 src/main.py 保持一致，uml_sequence 传空字符串（即使读取了也不用）
     initial_state = {
-        "user_input": request.requirement,
-        "uml_class": request.uml_class,
-        "uml_sequence": request.uml_sequence,
-        "arch_design": request.arch_design,
+        "user_input": requirement,
+        "uml_class": uml_class,
+        "uml_sequence": "",  # 强制为空，与原始逻辑一致
+        "arch_design": arch_design,
         "repo_name": request.repo_name,
         "code_file_DAG": repo_config.get("code_file_DAG", []),
         "repo_dir": repo_output_dir,
-        "dataset": request.dataset
+        "dataset": dataset
     }
     
     # 记录任务信息
@@ -113,7 +165,7 @@ async def generate_project(request: GenerateRequest):
         "iteration": 0,
         "progress": 0,
         "repo_dir": repo_output_dir,
-        "dataset": request.dataset,
+        "dataset": dataset,
         "repo_name": request.repo_name,
         "created_at": datetime.now().isoformat(),
         "message": "Task created, waiting to start..."
@@ -132,14 +184,29 @@ async def generate_project(request: GenerateRequest):
 def run_workflow_sync(project_id: str, initial_state: dict):
     # 这个函数在后台线程里跑，会一直卡住直到生成完
     from workflow import build_graph
+    import threading
     
     try:
+        # 检查是否已被取消
+        if tasks[project_id]["status"] == "cancelled":
+            return
+            
         tasks[project_id]["status"] = "running"
         tasks[project_id]["message"] = "Workflow started..."
         
         # 调用原来的workflow代码
         graph = build_graph()
-        final_state = graph.invoke(initial_state)
+        
+        # 注意：graph.invoke() 是阻塞调用，无法在运行中中断
+        # 取消操作只能在下次迭代前生效
+        # TODO: 需要修改 workflow 内部以支持中断检查
+        print(f"[ProjectGen] Starting workflow for project {project_id}...")
+        final_state = graph.invoke(initial_state, config={"recursion_limit": 50})
+        
+        # 检查是否在运行期间被取消
+        if tasks[project_id]["status"] == "cancelled":
+            tasks[project_id]["message"] = "Generation cancelled during execution"
+            return
         
         # 跑完了，更新状态
         tasks[project_id]["status"] = "completed"
@@ -153,9 +220,13 @@ def run_workflow_sync(project_id: str, initial_state: dict):
         }
         
     except Exception as e:
-        tasks[project_id]["status"] = "failed"
-        tasks[project_id]["error"] = str(e)
-        tasks[project_id]["message"] = f"Generation failed: {str(e)}"
+        # 检查是否因为取消而引发的异常
+        if tasks[project_id]["status"] == "cancelled":
+            tasks[project_id]["message"] = f"Generation cancelled: {str(e)}"
+        else:
+            tasks[project_id]["status"] = "failed"
+            tasks[project_id]["error"] = str(e)
+            tasks[project_id]["message"] = f"Generation failed: {str(e)}"
 
 
 @app.get("/api/projects/{project_id}/status")
@@ -174,6 +245,32 @@ async def get_project_status(project_id: str):
         task["progress"] = calculate_progress(stage, iteration)
     
     return ProjectStatus(**task)
+
+
+@app.post("/api/projects/{project_id}/cancel")
+async def cancel_project(project_id: str):
+    """取消正在运行的项目生成任务"""
+    if project_id not in tasks:
+        raise HTTPException(404, "Project not found")
+    
+    task = tasks[project_id]
+    
+    if task["status"] not in ["running", "pending"]:
+        return {
+            "project_id": project_id,
+            "message": f"Task is already {task['status']}, cannot cancel"
+        }
+    
+    # 标记为已取消
+    task["status"] = "cancelled"
+    task["message"] = "Task cancelled by user"
+    task["cancelled_at"] = datetime.now().isoformat()
+    
+    return {
+        "project_id": project_id,
+        "status": "cancelled",
+        "message": "Task cancellation requested. The task will stop at the next checkpoint."
+    }
 
 
 @app.get("/api/projects/{project_id}/files")

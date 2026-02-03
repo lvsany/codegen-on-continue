@@ -94,7 +94,7 @@ export const SimpleInput: React.FC<SimpleInputProps> = ({ onSubmit, disabled, pl
         value={value}
         onChange={handleInput}
         onKeyDown={handleKeyDown}
-        placeholder={placeholder || '使用 /projectgen repo=xxx 命令生成项目...'}
+        placeholder={placeholder || '使用 /projectgen repo=reponame 或 repo=dataset:reponame...'}
         rows={1}
         disabled={disabled}
       />

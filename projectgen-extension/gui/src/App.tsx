@@ -174,7 +174,12 @@ export const App: React.FC = () => {
   }, [vscode]);
   
   const parseCommand = (message: string) => {
-    const projectgenMatch = message.match(/\/projectgen\s+repo=(\w+)/);
+    // 支持多种格式:
+    // 1. /projectgen repo=xxx 或 /projectgen repo=dataset:xxx 或 /projectgen repo=dataset/xxx
+    // 2. 直接输入项目名: bplustree
+    // 3. 指定数据集: CodeProjectEval:bplustree 或 CodeProjectEval/bplustree
+    
+    const projectgenMatch = message.match(/\/projectgen\s+repo=([\w:\/\-]+)/);
     if (projectgenMatch) {
       return {
         isCommand: true,
@@ -183,6 +188,18 @@ export const App: React.FC = () => {
         originalMessage: message
       };
     }
+    
+    // 如果不是 /projectgen 命令，直接把输入当作 repo 名称
+    const trimmedMessage = message.trim();
+    if (trimmedMessage && !trimmedMessage.includes(' ')) {
+      return {
+        isCommand: true,
+        type: 'projectgen',
+        repo: trimmedMessage,
+        originalMessage: message
+      };
+    }
+    
     return { isCommand: false, originalMessage: message };
   };
     
@@ -281,7 +298,7 @@ export const App: React.FC = () => {
           <SimpleInput
             onSubmit={handleSubmit}
             disabled={isGenerating}
-            placeholder="使用 /projectgen repo=xxx 命令生成项目..."
+            placeholder="输入项目名(如: bplustree 或 CodeProjectEval:bplustree)..."
           />
         </InputBoxDiv>
         <Toolbar>

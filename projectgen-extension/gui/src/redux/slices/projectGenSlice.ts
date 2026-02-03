@@ -52,7 +52,8 @@ const projectGenSlice = createSlice({
     },
     setError: (state, action: PayloadAction<string>) => {
       state.error = action.payload;
-      state.isGenerating = false;
+      // 保持 isGenerating 为 true，让用户可以点击停止按钮
+      // state.isGenerating = false;
     },
     resetGeneration: (state) => {
       state.isGenerating = false;
