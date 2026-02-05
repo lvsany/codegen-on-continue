@@ -12,6 +12,7 @@ export interface ProjectGenState {
   files: GeneratedFile[];
   currentRepo: string;
   error: string | null;
+  statusMessage: string;
 }
 
 const initialState: ProjectGenState = {
@@ -20,7 +21,8 @@ const initialState: ProjectGenState = {
   progress: 0,
   files: [],
   currentRepo: '',
-  error: null
+  error: null,
+  statusMessage: ''
 };
 
 const projectGenSlice = createSlice({
@@ -34,6 +36,10 @@ const projectGenSlice = createSlice({
       state.progress = 0;
       state.currentStage = '';
       state.error = null;
+      state.statusMessage = '';
+    },
+    setStatusMessage: (state, action: PayloadAction<string>) => {
+      state.statusMessage = action.payload;
     },
     updateProgress: (state, action: PayloadAction<{ stage: 'architecture' | 'skeleton' | 'code'; progress: number }>) => {
       state.currentStage = action.payload.stage;
@@ -62,6 +68,7 @@ const projectGenSlice = createSlice({
       state.files = [];
       state.currentRepo = '';
       state.error = null;
+      state.statusMessage = '';
     },
     reset: () => initialState
   }
@@ -74,6 +81,7 @@ export const {
   completeGeneration,
   stopGeneration,
   setError,
+  setStatusMessage,
   resetGeneration,
   reset
 } = projectGenSlice.actions;
