@@ -1,1 +1,3 @@
 ./*_outputs/
+projectgen-server/.env
+projectgen-server/logs/

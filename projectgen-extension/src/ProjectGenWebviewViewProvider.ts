@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
+import * as https from 'https';
 
 interface ProjectGenResponse {
     error?: string;
@@ -13,6 +14,8 @@ interface ProjectGenResponse {
 
 interface ProjectStatusResponse {
     project_id: string;
+    repo_name?: string;
+    output_dir?: string;
     status: string;
     current_stage: string;
     iteration: number;
@@ -29,24 +32,33 @@ interface GeneratedFile {
 interface FilesResponse {
     project_id: string;
     repo_name: string;
+    output_dir?: string;
     files: GeneratedFile[];
     total_files: number;
     status: string;
+}
+
+interface ApiErrorPayload {
+    status?: number;
+    error_code?: string;
+    message?: string;
+    detail?: any;
 }
 
 // Helper function to make HTTP requests
 function httpRequest(url: string, options: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ ok: boolean; status: number; statusText: string; json: () => Promise<any>; text: () => Promise<string> }> {
     return new Promise((resolve, reject) => {
         const urlObj = new URL(url);
+        const requestLib = urlObj.protocol === 'https:' ? https : http;
         const requestOptions: http.RequestOptions = {
             hostname: urlObj.hostname,
-            port: urlObj.port || 80,
+            port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
             path: urlObj.pathname + urlObj.search,
             method: options.method,
             headers: options.headers || {}
         };
 
-        const req = http.request(requestOptions, (res) => {
+        const req = requestLib.request(requestOptions, (res) => {
             let data = '';
             res.on('data', (chunk) => {
                 data += chunk;
@@ -71,6 +83,38 @@ function httpRequest(url: string, options: { method: string; headers?: Record<st
         }
         req.end();
     });
+}
+
+function extractApiErrorPayload(rawText: string): ApiErrorPayload | null {
+    try {
+        const parsed = JSON.parse(rawText);
+        if (parsed && typeof parsed === 'object') {
+            if (parsed.detail && typeof parsed.detail === 'object') {
+                return parsed.detail as ApiErrorPayload;
+            }
+            return parsed as ApiErrorPayload;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+async function formatApiError(response: { status: number; statusText: string; text: () => Promise<string> }): Promise<string> {
+    const rawText = await response.text();
+    const payload = extractApiErrorPayload(rawText);
+    const statusPart = `${response.status} ${response.statusText}`.trim();
+
+    if (payload?.message) {
+        const codePart = payload.error_code ? ` [${payload.error_code}]` : '';
+        return `服务器返回错误: ${statusPart}${codePart}\n${payload.message}`;
+    }
+
+    if (rawText) {
+        return `服务器返回错误: ${statusPart}\n${rawText}`;
+    }
+
+    return `服务器返回错误: ${statusPart}`;
 }
 
 export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider {
@@ -118,23 +162,35 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
         });
     }
 
-    private _abortController: AbortController | null = null;
     private _currentProjectId: string | null = null;
     private _currentRepoName: string | null = null;  // 跟踪当前项目名称
+    private _currentOutputDir: string | null = null;
+
+    private getServerUrl(): string {
+        const configuredUrl = vscode.workspace.getConfiguration('projectgen').get<string>('serverUrl', 'http://localhost:5002');
+        return (configuredUrl || 'http://localhost:5002').replace(/\/+$/, '');
+    }
+
+    private getServerOriginForCsp(): string {
+        try {
+            return new URL(this.getServerUrl()).origin;
+        } catch {
+            return 'http://localhost:5002';
+        }
+    }
 
     private async handleStopGeneration() {
-        // 如果有正在进行的HTTP请求，取消它
-        if (this._abortController) {
-            this._abortController.abort();
-            this._abortController = null;
-        }
-        
         // 如果有正在生成的项目，通知服务器取消
         if (this._currentProjectId) {
             try {
-                await httpRequest(`http://localhost:5002/api/projects/${this._currentProjectId}/cancel`, {
-                    method: 'POST'
+                const response = await httpRequest(`${this.getServerUrl()}/api/projects/${this._currentProjectId}/cancel`, {
+                    method: 'POST',
                 });
+
+                if (!response.ok) {
+                    throw new Error(await formatApiError(response));
+                }
+
                 this.postMessage({ type: 'info', content: '已请求停止生成任务' });
             } catch (error: any) {
                 this.postMessage({ type: 'error', content: `停止任务失败: ${error.message}` });
@@ -146,57 +202,7 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
     }
 
     private async handleGenerate(data: any) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders) {
-            this.postMessage({ type: 'error', content: '请先打开一个工作区文件夹' });
-            return;
-        }
-
-        const workspaceRoot = workspaceFolders[0].uri.fsPath;
-        const userMessage = data.message;
-
-        try {
-            // Send progress update
-            this.postMessage({ type: 'info', content: '正在连接到 ProjectGen 服务器...' });
-
-            // 对于自然语言需求，我们需要一个默认的repo或者让用户指定
-            // 这里暂时使用一个示例repo，实际应该有个repo选择界面
-            const response = await httpRequest('http://localhost:5002/api/projects/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    dataset: 'DevBench',
-                    repo_name: 'readtime',  // 使用DevBench中实际存在的项目
-                    requirement: userMessage,
-                    model: 'gpt-4o'
-                })
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`服务器返回错误: ${response.status} ${response.statusText}\n${errorText}`);
-            }
-
-            const result = await response.json() as any;
-            
-            if (result.project_id) {
-                // 记录当前项目 ID
-                this._currentProjectId = result.project_id;
-                
-                // 服务器返回格式: {project_id, status, message}
-                this.postMessage({ 
-                    type: 'result', 
-                    content: `✅ 项目生成任务已创建！\n\nProject ID: ${result.project_id}\nStatus: ${result.status}\n${result.message || ''}\n\n可以使用 project_id 查询生成进度。` 
-                });
-            } else {
-                this.postMessage({ type: 'error', content: `生成失败: 服务器返回格式错误` });
-            }
-        } catch (error: any) {
-            this.postMessage({ 
-                type: 'error', 
-                content: `连接失败: ${error.message}\n\n请确保 ProjectGen 服务器正在运行 (http://localhost:5002)` 
-            });
-        }
+        this.postMessage({ type: 'error', content: '请使用命令格式：/projectgen repo=<路径>' });
     }
 
     private async handleGenerateFromRepo(data: any) {
@@ -207,57 +213,52 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
             return;
         }
 
+        const repoInput = String(data.repo || '');
         const workspaceRoot = workspaceFolders[0].uri.fsPath;
-        const repo = data.repo;
-        console.log('[ProjectGen] Processing repo:', repo);
-        // 支持指定数据集，格式: dataset:repo 或 dataset/repo，如果不指定则自动搜索
-        let dataset = '';  // 空字符串表示自动搜索
-        let repoName = repo;
-        
-        // 解析 dataset:repo 或 dataset/repo 格式
-        if (repo.includes(':')) {
-            [dataset, repoName] = repo.split(':');
-        } else if (repo.includes('/')) {
-            [dataset, repoName] = repo.split('/');
+        const trimmedRepoInput = repoInput.trim();
+
+        if (!trimmedRepoInput) {
+            this.postMessage({ type: 'error', content: 'repo 路径不能为空' });
+            return;
         }
-        // 如果没有分隔符，dataset 保持为空，服务器会自动搜索
+
+        const resolvedPreviewPath = path.isAbsolute(trimmedRepoInput)
+            ? path.resolve(trimmedRepoInput)
+            : path.resolve(workspaceRoot, trimmedRepoInput);
+        console.log('[ProjectGen] Processing repo path:', resolvedPreviewPath);
 
         try {
-            const displayText = dataset 
-                ? `正在从 ${dataset}/${repoName} 生成项目...` 
-                : `正在搜索并生成项目 ${repoName}...`;
-            this.postMessage({ type: 'info', content: displayText });
+            this.postMessage({ type: 'info', content: `正在从路径生成项目: ${resolvedPreviewPath}` });
 
-            const response = await httpRequest('http://localhost:5002/api/projects/generate', {
+            const response = await httpRequest(`${this.getServerUrl()}/api/projects/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    dataset: dataset,  // 空字符串表示自动搜索
-                    repo_name: repoName,
-                    requirement: `Generate project for ${repoName}`,
+                    repo_path: trimmedRepoInput,
+                    workspace_root: workspaceRoot,
+                    requirement: data.message || `Generate project for ${path.basename(resolvedPreviewPath)}`,
                     model: 'gpt-4o'
                 })
             });
 
             if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`服务器返回错误: ${response.status} ${response.statusText}\n${errorText}`);
+                throw new Error(await formatApiError(response));
             }
 
             const result = await response.json() as any;
             
-            if (result.project_id) {                // 记录当前项目 ID
+            if (result.project_id) {
                 this._currentProjectId = result.project_id;
-                this._currentRepoName = repoName;  // 记录repo名称
-                                // 开始轮询进度
-                this.pollProgress(result.project_id, repo);
+                this._currentRepoName = result.repo_name || path.basename(resolvedPreviewPath);
+                this._currentOutputDir = result.output_dir || null;
+                this.pollProgress(result.project_id, repoInput);
             } else {
                 this.postMessage({ type: 'error', content: `生成失败: 服务器返回格式错误` });
             }
         } catch (error: any) {
             this.postMessage({ 
                 type: 'error', 
-                content: `连接失败: ${error.message}\n\n请确保 ProjectGen 服务器正在运行 (http://localhost:5002)` 
+                content: `请求失败: ${error.message}\n\n请检查服务地址配置（projectgen.serverUrl）和 repo 路径` 
             });
         }
     }
@@ -267,14 +268,23 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
         
         const pollInterval = setInterval(async () => {
             try {
-                const response = await httpRequest(`http://localhost:5002/api/projects/${projectId}/status`, { method: 'GET' });
+                const response = await httpRequest(`${this.getServerUrl()}/api/projects/${projectId}/status`, {
+                    method: 'GET',
+                });
                 if (!response.ok) {
                     clearInterval(pollInterval);
-                    this.postMessage({ type: 'error', content: '无法获取生成进度' });
+                    this.postMessage({ type: 'error', content: await formatApiError(response) });
                     return;
                 }
 
                 const status = await response.json() as ProjectStatusResponse;
+
+                if (status.repo_name) {
+                    this._currentRepoName = status.repo_name;
+                }
+                if (status.output_dir) {
+                    this._currentOutputDir = status.output_dir;
+                }
                 
                 // 发送进度更新
                 this.postMessage({
@@ -289,9 +299,17 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
                 
                 // 获取当前文件列表，检测新文件
                 try {
-                    const filesResponse = await fetch(`http://localhost:5002/api/projects/${projectId}/files?include_content=true`);
+                    const filesResponse = await httpRequest(`${this.getServerUrl()}/api/projects/${projectId}/files?include_content=true`, {
+                        method: 'GET',
+                    });
                     if (filesResponse.ok) {
                         const filesData = await filesResponse.json() as FilesResponse;
+                        if (filesData.repo_name) {
+                            this._currentRepoName = filesData.repo_name;
+                        }
+                        if (filesData.output_dir) {
+                            this._currentOutputDir = filesData.output_dir;
+                        }
                         const currentFiles = filesData.files || [];
                         
                         console.log(`[ProjectGen] 获取到 ${currentFiles.length} 个文件，已知 ${knownFiles.size} 个`);
@@ -311,7 +329,7 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
                             }
                         }
                     } else {
-                        console.log(`[ProjectGen] 获取文件失败: ${filesResponse.status} ${filesResponse.statusText}`);
+                        console.log(`[ProjectGen] 获取文件失败: ${await formatApiError(filesResponse)}`);
                     }
                 } catch (e: any) {
                     console.log(`[ProjectGen] 获取文件异常: ${e.message}`);
@@ -341,13 +359,22 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
 
     private async fetchGeneratedFiles(projectId: string, repo: string) {
         try {
-            const response = await fetch(`http://localhost:5002/api/projects/${projectId}/files`);
+            const response = await httpRequest(`${this.getServerUrl()}/api/projects/${projectId}/files`, {
+                method: 'GET',
+            });
             if (!response.ok) {
-                this.postMessage({ type: 'result', content: '✅ 项目生成完成！' });
+                this.postMessage({ type: 'error', content: await formatApiError(response) });
                 return;
             }
 
             const result = await response.json() as FilesResponse;
+            if (result.repo_name) {
+                this._currentRepoName = result.repo_name;
+            }
+            if (result.output_dir) {
+                this._currentOutputDir = result.output_dir;
+            }
+
             this.postMessage({
                 type: 'files',
                 content: {
@@ -364,41 +391,29 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
     private async handleOpenFile(data: any) {
         try {
             const filePath = data.filePath;  // 从前端传来的文件路径
-            
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (!workspaceFolders) {
-                vscode.window.showErrorMessage('请先打开一个工作区文件夹');
+            if (!this._currentOutputDir) {
+                vscode.window.showErrorMessage('无法确定输出目录，请先开始生成任务');
+                return;
+            }
+
+            const baseDir = path.resolve(this._currentOutputDir);
+            const normalizedPath = path.resolve(baseDir, filePath);
+            const basePrefix = `${baseDir}${path.sep}`;
+
+            if (normalizedPath !== baseDir && !normalizedPath.startsWith(basePrefix)) {
+                vscode.window.showErrorMessage('非法文件路径，已阻止访问');
                 return;
             }
             
-            const workspaceRoot = workspaceFolders[0].uri.fsPath;
+            console.log(`[ProjectGen] 尝试打开文件: ${normalizedPath}`);
             
-            // 直接使用 DevBench_outputs 中的实际文件
-            // 文件路径格式: geotext/__init__.py 或 tmp_files/architecture_1.json
-            // 需要组合成: DevBench_outputs/gpt-4o/{repo_name}/{file_path}
-            
-            if (!this._currentRepoName) {
-                vscode.window.showErrorMessage('无法确定项目名称');
-                return;
-            }
-            
-            const actualPath = path.join(
-                workspaceRoot, 
-                'DevBench_outputs', 
-                'gpt-4o', 
-                this._currentRepoName,
-                filePath
-            );
-            
-            console.log(`[ProjectGen] 尝试打开文件: ${actualPath}`);
-            
-            if (!fs.existsSync(actualPath)) {
+            if (!fs.existsSync(normalizedPath)) {
                 vscode.window.showErrorMessage(`文件不存在: ${filePath}`);
                 return;
             }
             
             // 在编辑器中打开文件
-            const document = await vscode.workspace.openTextDocument(actualPath);
+            const document = await vscode.workspace.openTextDocument(normalizedPath);
             await vscode.window.showTextDocument(document, { preview: false });
             
         } catch (error: any) {
@@ -407,6 +422,9 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
     }
 
     private handleNewSession() {
+        this._currentProjectId = null;
+        this._currentRepoName = null;
+        this._currentOutputDir = null;
         this.postMessage({ type: 'info', content: '已开始新会话' });
     }
 
@@ -424,13 +442,14 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
         );
 
         const nonce = this.getNonce();
+        const serverOrigin = this.getServerOriginForCsp();
 
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; connect-src http://localhost:5002 http://127.0.0.1:5002;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; connect-src ${serverOrigin};">
     <link rel="stylesheet" type="text/css" href="${styleUri}">
     <title>ProjectGen</title>
     <style>

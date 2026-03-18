@@ -57,6 +57,16 @@
         "category": "ProjectGen"
       }
     ],
+    "configuration": {
+      "title": "ProjectGen",
+      "properties": {
+        "projectgen.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:5002",
+          "description": "ProjectGen server base URL"
+        }
+      }
+    },
     "keybindings": [
       {
         "command": "projectgen.focusChat",

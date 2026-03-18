@@ -27,6 +27,19 @@ echo "[DEBUG] start projectgen-server!!!"
 python main.py &
 SERVER_PID=$! # 在后台执行
 
+stop_server() {
+    echo ""
+    echo "正在停止服务器..."
+
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+        # 单一停止方式：发送 INT 并等待进程退出。
+        kill -INT "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+    fi
+
+    echo "服务器已停止"
+}
+
 sleep 3
 
 # 检查服务器是否运行
@@ -68,7 +81,7 @@ echo "按 Ctrl+C 停止服务器"
 echo ""
 
 # 等待用户中断
-trap "echo ''; echo '正在停止服务器...'; kill $SERVER_PID 2>/dev/null; echo '服务器已停止'; exit 0" INT
+trap 'stop_server; exit 0' INT TERM
 
 # 保持脚本运行
 wait $SERVER_PID

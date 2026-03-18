@@ -52,6 +52,7 @@ const MessageBody = styled.div<{ type: 'user' | 'assistant' | 'error' | 'info' }
   line-height: 1.65;
   color: var(--vscode-foreground);
   word-wrap: break-word;
+  white-space: pre-wrap;
   
   ${props => props.type === 'error' && `
     color: #f87171;
@@ -137,7 +138,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ type, content }) => {
         </MessageHeader>
         <MessageBody type={type}>
           {typeof content === 'string' ? (
-            <div dangerouslySetInnerHTML={{ __html: content }} />
+            <span>{content}</span>
           ) : (
             content
           )}

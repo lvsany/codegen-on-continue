@@ -290,32 +290,31 @@ export const App: React.FC = () => {
   }, [vscode]);
   
   const parseCommand = (message: string) => {
-    // 支持多种格式:
-    // 1. /projectgen repo=xxx 或 /projectgen repo=dataset:xxx 或 /projectgen repo=dataset/xxx
-    // 2. 直接输入项目名: bplustree
-    // 3. 指定数据集: CodeProjectEval:bplustree 或 CodeProjectEval/bplustree
-    
-    const projectgenMatch = message.match(/\/projectgen\s+repo=([\w:\/\-]+)/);
+    // 支持路径格式: /projectgen repo=<绝对或相对路径>
+    const projectgenMatch = message.match(/\/projectgen\s+repo=(.+)$/i);
     if (projectgenMatch) {
+      let repoPath = projectgenMatch[1].trim();
+
+      // 允许使用引号包裹路径，便于传入带空格路径。
+      if (
+        (repoPath.startsWith('"') && repoPath.endsWith('"')) ||
+        (repoPath.startsWith("'") && repoPath.endsWith("'"))
+      ) {
+        repoPath = repoPath.slice(1, -1).trim();
+      }
+
+      if (!repoPath) {
+        return { isCommand: false, originalMessage: message };
+      }
+
       return {
         isCommand: true,
         type: 'projectgen',
-        repo: projectgenMatch[1],
+        repo: repoPath,
         originalMessage: message
       };
     }
-    
-    // 如果不是 /projectgen 命令，直接把输入当作 repo 名称
-    const trimmedMessage = message.trim();
-    if (trimmedMessage && !trimmedMessage.includes(' ')) {
-      return {
-        isCommand: true,
-        type: 'projectgen',
-        repo: trimmedMessage,
-        originalMessage: message
-      };
-    }
-    
+
     return { isCommand: false, originalMessage: message };
   };
     
@@ -375,31 +374,31 @@ export const App: React.FC = () => {
             </EmptyIcon>
             <EmptyTitle>Welcome to ProjectGen</EmptyTitle>
             <EmptyDescription>
-              Transform your ideas into production-ready code. Select a template below or describe your project.
+              Use a repository path to generate code. Example: /projectgen repo=./datasets/CodeProjectEval/bplustree
             </EmptyDescription>
             <SuggestionGrid>
-              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=bplustree')}>
+              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=./datasets/CodeProjectEval/bplustree')}>
                 <SuggestionText>
                   <strong>B+ Tree</strong>
-                  <span>Data structure</span>
+                  <span>CodeProjectEval path</span>
                 </SuggestionText>
               </SuggestionButton>
-              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=flask')}>
+              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=./datasets/CodeProjectEval/flask')}>
                 <SuggestionText>
                   <strong>Flask</strong>
-                  <span>Web framework</span>
+                  <span>CodeProjectEval path</span>
                 </SuggestionText>
               </SuggestionButton>
-              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=tinydb')}>
+              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=/absolute/path/to/repo')}>
                 <SuggestionText>
-                  <strong>TinyDB</strong>
-                  <span>Document database</span>
+                  <strong>Absolute Path</strong>
+                  <span>Custom repository</span>
                 </SuggestionText>
               </SuggestionButton>
-              <SuggestionButton onClick={() => setSuggestion('/projectgen repo=simpy')}>
+              <SuggestionButton onClick={() => setSuggestion('/projectgen repo="./datasets/CodeProjectEval/csvs-to-sqlite"')}>
                 <SuggestionText>
-                  <strong>SimPy</strong>
-                  <span>Simulation library</span>
+                  <strong>Quoted Path</strong>
+                  <span>CodeProjectEval path</span>
                 </SuggestionText>
               </SuggestionButton>
             </SuggestionGrid>
@@ -429,7 +428,7 @@ export const App: React.FC = () => {
           <SimpleInput
             onSubmit={handleSubmit}
             disabled={isGenerating}
-            placeholder="Enter project name or describe what you want to build..."
+            placeholder="Use /projectgen repo=<path> (relative to workspace is supported)"
           />
         </InputBoxDiv>
         <Toolbar>

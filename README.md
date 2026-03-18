@@ -1,151 +1,149 @@
-# Towards Realistic Project-Level Code Generation via Multi-Agent Collaboration and Semantic Architecture Modeling
+# ProjectGen (Extension + Server)
 
-ProjectGen is a multi-agent framework that decomposes projects into architecture design, skeleton generation, and code filling stages with iterative refinement and memory-based context management.
+这是当前可运行版本的 ProjectGen 文档，覆盖 VS Code 插件与本地后端服务的实际行为。
 
-## ProjectGen
+## 1. 当前能力
 
-#### Code Structure Overview
+- 在 VS Code 侧边栏运行 ProjectGen。
+- 通过命令触发项目级生成。
+- 实时轮询阶段进度并增量展示文件。
+- 支持停止任务、查看生成文件并在编辑器中打开。
+- 支持仓库路径输入（绝对路径，或基于 workspace 的相对路径）。
 
-The core implementation resides in the `src/` directory, which contains three major components: the multi-agent system, the memory management module, and a set of workflow and utility scripts. The directory structure is shown below:
+## 2. 命令格式
 
-```
-src/
-├── agents/
-│   ├── architecture_agent.py
-│   ├── arch_judge_agent.py
-│   ├── skeleton_agent.py
-│   ├── skeleton_judge_agent.py
-│   ├── code_agent.py
-│   ├── code_judge_agent.py
-│   └── test.py
-│
-├── memory_manager/
-│   ├── arch_memory.py
-│   ├── skeleton_memory.py
-│   ├── code_memory.py
-│   └── __init__.py
-│
-├── build_dependency_graph.py
-├── extract_api.py
-├── logger.py
-├── main.py
-├── prompts.py
-├── utils.py
-└── workflow.py
+唯一有效命令：
+
+```text
+/projectgen repo=<路径>
 ```
 
-- **agents/:**
-  This directory contains the core agents used in the three-stage generation workflow. Each stage consists of a generation agent and a judging agent, forming a generate–evaluate–refine loop.
+示例：
 
-- **memory_manager/:**
-  The memory modules preserve intra-stage semantic information, enabling agents to efficiently access relevant context from previous iterations.
-
-- **build_dependency_graph.py:**
-  Constructs file-level dependency graphs to support ordering.
-
-- **extract_api.py:**
-  Extracts function signatures from generated code to support iteration.
-
-- **logger.py:**
-  A unified logging module for debugging, tracing agent outputs, and monitoring workflow execution.
-
-- **main.py:**
-  The main entry point of the system.
-
-- **prompts.py:**
-  Contains prompt templates used by all agents.
-
-- **utils.py:**
-  Provides general-purpose utility functions.
-
-- **workflow.py:**
-  Defines the overall multi-agent generation workflow.
-
-#### Installation
-
+```text
+/projectgen repo=./datasets/CodeProjectEval/bplustree
+/projectgen repo=./datasets/CodeProjectEval/flask
+/projectgen repo=/absolute/path/to/repo
 ```
-conda create -n projectgen python=3.9
-conda activate projectgen
+
+说明：
+
+- `repo` 参数必须是仓库目录路径。
+- 相对路径由后端基于 `workspace_root` 统一解析。
+- 旧的 `dataset + repo_name` 自动搜索逻辑已移除。
+
+## 3. 启动方式
+
+### 3.1 启动后端
+
+```bash
+cd projectgen-server
 pip install -r requirements.txt
+python main.py
 ```
 
-#### Usage
+默认地址：`http://localhost:5002`
 
-Open `src/utils.py` and fill in your OpenAI API key:
+### 3.2 启动扩展
 
-```
-os.environ["OPENAI_API_KEY"] = "your_openai_api_key_here"
-```
-
-
-Navigate to the `src` directory and run the main script:
-
-```
-cd src
-python main.py --dataset=CodeProjectEval
+```bash
+cd projectgen-extension
+npm install
+npm run compile
 ```
 
-The outputs will be stored in the `CodeProjectEval_outputs/` folder.
+在 VS Code 打开 `projectgen-extension`，按 `F5` 启动扩展开发主机。
 
+## 4. 配置项
 
-## CodeProjectEval
+扩展配置：
 
-To better reflect real-world project scenarios and support evaluation through executable test cases, we construct a new project-level code generation dataset, CodeProjectEval, which consists of 18 Python repositories covering a wide range of topics.
+- `projectgen.serverUrl`：后端服务地址，默认 `http://localhost:5002`
 
-#### Detailed Information
+说明：
 
-| Repository                    | #FILE    | #LOC        | Complexity | #Check Tests (cov.) | #Unit Tests (cov.) | #PRD tokens |
-| ----------------------------- | -------- | ----------- | ---------- | ------------------- | ------------------ | ----------- |
-| bplustree                     | 8        | 1,509       | 2.29       | 8 (82%)             | 356 (98%)          | 1,339       |
-| cookiecutter                  | 18       | 2,805       | 3.42       | 7 (55%)             | 375 (99%)          | 2,100       |
-| csvs-to-sqlite                | 3        | 816         | 5.83       | 10 (81%)            | 25 (88%)           | 1,841       |
-| deprecated                    | 3        | 597         | 4.08       | 26 (80%)            | 176 (95%)          | 953         |
-| djangorestframework-simplejwt | 31       | 2,014       | 2.09       | 8 (63%)             | 191 (93%)          | 1,614       |
-| flask                         | 24       | 9,314       | 2.71       | 25 (52%)            | 482 (91%)          | 2,913       |
-| imapclient                    | 17       | 3,531       | 2.81       | 9 (40%)             | 267 (80%)          | 3,810       |
-| parsel                        | 5        | 1,128       | 2.60       | 5 (65%)             | 250 (95%)          | 1,522       |
-| portalocker                   | 9        | 1,958       | 2.84       | 10 (58%)            | 71 (94%)           | 1,990       |
-| pyjwt                         | 12       | 2,690       | 3.01       | 10 (53%)            | 294 (94%)          | 382         |
-| python-hl7                    | 11       | 2,434       | 2.98       | 10 (56%)            | 100 (87%)          | 2,292       |
-| rsa                           | 14       | 2,949       | 2.40       | 6 (73%)             | 100 (87%)          | 3,318       |
-| simpy                         | 12       | 2,184       | 2.01       | 7 (60%)             | 149 (90%)          | 2,147       |
-| tinydb                        | 10       | 2,170       | 1.76       | 10 (58%)            | 204 (95%)          | 947         |
-| trailscraper                  | 13       | 890         | 2.01       | 4 (65%)             | 93 (92%)           | 3,415       |
-| voluptuous                    | 7        | 3,100       | 2.55       | 11 (55%)            | 161 (90%)          | 1,221       |
-| xmnlp                         | 24       | 1,504       | 3.47       | 8 (65%)             | 23 (81%)           | 3,105       |
-| zxcvbn                        | 8        | 1,402       | 5.69       | 6 (81%)             | 31 (84%)           | 2,399       |
-| **Avg.**                      | **12.7** | **2,388.6** | **3.03**   | **10 (63.4%)**      | **186 (90.7%)**    | **2,067**   |
-| **Mid.**                      | **11.5** | **2,092**   | **2.76**   | **8.5 (61.5%)**     | **168.5 (91.5%)**  | **2,100**   |
+- 当前版本不需要任何鉴权配置。
 
+## 5. API 与错误处理
 
-**Each repository is supplemented with:**
+核心接口：
 
-- **docs/PRD.md:** provides detailed descriptions of a software system’s functional and non-functional requirements, guiding subsequent design and development.
-- **docs/UML_pyreverse.md:** UML class diagram and package diagram generated by Pyreverse.
-- **docs/architecture_design.md:** the directory tree of the repository and descriptions for each
-  source file, accompanied by summaries of the classes and functions they contain.
-- **check_tests/:** to provide initial verification during the code generation process.
-- **unit_tests/:** executed upon completion of code generation to evaluate the overall quality and functional correctness of the generated projects.
+- `GET /api/health`
+- `POST /api/projects/generate`
+- `GET /api/projects/{project_id}/status`
+- `POST /api/projects/{project_id}/cancel`
+- `GET /api/projects/{project_id}/files`
 
+### 5.1 统一错误返回
 
-#### Test Scripts
+后端错误响应格式：
 
-- **Similarity-based Evaluation (SketchBLEU)**
+```json
+{
+  "detail": {
+    "status": 404,
+    "error_code": "REPO_NOT_FOUND",
+    "message": "仓库路径不存在或不是目录",
+    "detail": {
+      "resolved_repo_path": "/abs/path"
+    }
+  }
+}
+```
 
-  We adopt SketchBLEU, a similarity-based metric originally introduced in the [CodeS framework](https://github.com/NL2Code/CodeS).
-  This metric evaluates the structural similarity between the generated code and the reference implementation. To calculate SketchBLEU:
+常见错误码：
 
-  ```
-  cd datasets/evaluation
-  python calc_sketchbleu.py
-  ```
+- `INVALID_REPO_PATH`：路径为空或非法。
+- `REPO_NOT_FOUND`：仓库目录不存在。
+- `REPO_CONFIG_MISSING`：缺少 `config.json`。
+- `REPO_CONFIG_INVALID_JSON`：`config.json` 不是有效 JSON。
+- `PROJECT_NOT_FOUND`：任务 ID 不存在。
+- `PROJECT_NOT_CANCELLABLE`：任务状态不可取消。
 
-- **Unit Test–based Evaluation**
+前端会优先显示：`HTTP 状态 + error_code + message`。
 
-  For functional correctness evaluation, each repository contains a set of unit tests.
-  To run the unit tests:
+## 6. 输出目录
 
-  ```
-  cd datasets/evaluation
-  python calc_passrate.py
-  ```
+后端输出目录由 `PROJECTGEN_OUTPUT_DIR` 决定，默认：
+
+```text
+<repo_root>/projectgen_outputs/<model>/<repo_name>/
+```
+
+## 7. 安全与稳定性（当前状态）
+
+- 已移除聊天消息 HTML 注入渲染，默认纯文本显示。
+- 文件打开使用输出目录边界校验，阻止路径穿越。
+- 停止任务为进程级终止（后端子进程）。
+- `run.sh` 停服逻辑为单一方式：发送 `INT` 并等待退出。
+
+## 8. 常见问题
+
+### 8.1 404: REPO_NOT_FOUND
+
+请确认传入路径真实存在，例如：
+
+```bash
+find datasets -type d -name bplustree
+```
+
+本仓库中可用路径示例：
+
+- `./datasets/CodeProjectEval/bplustree`
+
+### 8.2 UI 示例路径未更新
+
+如果源码已改但界面仍显示旧示例，重新构建 GUI：
+
+```bash
+cd projectgen-extension
+npm run build:gui
+```
+
+## 9. 关键文件
+
+- 插件入口: `projectgen-extension/src/extension.ts`
+- Webview 通信: `projectgen-extension/src/ProjectGenWebviewViewProvider.ts`
+- 前端界面: `projectgen-extension/gui/src/App.tsx`
+- 后端服务: `projectgen-server/main.py`
+- 启动脚本: `run.sh`
