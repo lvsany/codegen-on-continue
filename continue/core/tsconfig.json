@@ -18,7 +18,6 @@
     "noEmitOnError": false,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    "types": ["jest", "node"],
     "sourceMap": true,
     "inlineSources": true,
 

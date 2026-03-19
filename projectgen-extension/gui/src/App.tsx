@@ -5,7 +5,6 @@ import { startGeneration, updateProgress, addFile, completeGeneration, stopGener
 import { VsCodeApiContext } from './context/VsCodeApi';
 import { SimpleInput } from './components/mainInput/SimpleInput';
 import { InputBoxDiv } from './components/mainInput/StyledComponents';
-import { ChatMessage } from './components/chat/ChatMessage';
 import { GenerationSession } from './components/chat/GenerationSession';
 
 // 🎬 动画
@@ -234,16 +233,10 @@ const SuggestionText = styled.div`
   }
 `;
 
-interface Message {
-  type: 'user' | 'assistant' | 'error' | 'info';
-  content: string | React.ReactNode;
-}
-
 export const App: React.FC = () => {
   const dispatch = useAppDispatch();
   const vscode = useContext(VsCodeApiContext);
-  const { isGenerating, currentStage, progress, files, currentRepo, statusMessage } = useAppSelector((state) => state.projectGen);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const { isGenerating, currentStage, progress, files, currentRepo, statusMessage, error } = useAppSelector((state) => state.projectGen);
   const [showEmpty, setShowEmpty] = useState(true);
   const [isSessionComplete, setIsSessionComplete] = useState(false);
   
@@ -268,7 +261,6 @@ export const App: React.FC = () => {
           break;
         case 'error':
           dispatch(setError(message.content));
-          setMessages(prev => [...prev, { type: 'error', content: '❌ ' + message.content }]);
           break;
         case 'info':
           // Info 消息直接更新到 statusMessage，显示在 GenerationSession 中
@@ -290,6 +282,9 @@ export const App: React.FC = () => {
   }, [vscode]);
   
   const parseCommand = (message: string) => {
+    const trimmed = message.trim();
+    const isProjectGenCommand = /^\/projectgen\b/i.test(trimmed);
+
     // 支持路径格式: /projectgen repo=<绝对或相对路径>
     const projectgenMatch = message.match(/\/projectgen\s+repo=(.+)$/i);
     if (projectgenMatch) {
@@ -311,7 +306,18 @@ export const App: React.FC = () => {
         isCommand: true,
         type: 'projectgen',
         repo: repoPath,
-        originalMessage: message
+        originalMessage: message,
+        valid: true
+      };
+    }
+
+    if (isProjectGenCommand) {
+      return {
+        isCommand: true,
+        type: 'projectgen',
+        repo: '',
+        originalMessage: message,
+        valid: false
       };
     }
 
@@ -321,28 +327,36 @@ export const App: React.FC = () => {
   const handleSubmit = useCallback((message: string) => {
     setShowEmpty(false);
     setIsSessionComplete(false);
-    setMessages(prev => [...prev, { type: 'user', content: message }]);
-    
+
     const parsed = parseCommand(message);
     
-    if (parsed.isCommand && parsed.repo) {
-      dispatch(startGeneration(parsed.repo));
-      vscode?.postMessage({
-        type: 'generateFromRepo',
-        repo: parsed.repo,
-        commandType: parsed.type,
-        message: parsed.originalMessage
-      });
-    } else {
+    if (parsed.isCommand) {
+      dispatch(startGeneration(parsed.repo || '未指定路径'));
+
+      if (parsed.repo) {
+        vscode?.postMessage({
+          type: 'generateFromRepo',
+          repo: parsed.repo,
+          commandType: parsed.type,
+          message: parsed.originalMessage
+        });
+        return;
+      }
+
       vscode?.postMessage({
         type: 'generate',
         message: message
       });
+      return;
     }
+
+    vscode?.postMessage({
+      type: 'generate',
+      message: message
+    });
   }, [dispatch, vscode]);
   
   const handleClear = useCallback(() => {
-    setMessages([]);
     setShowEmpty(true);
     setIsSessionComplete(false);
     dispatch(resetGeneration());
@@ -353,7 +367,6 @@ export const App: React.FC = () => {
     vscode?.postMessage({
       type: 'stopGeneration'
     });
-    setMessages(prev => [...prev, { type: 'info', content: '⏹️ Generation stopped' }]);
   }, [dispatch, vscode]);
   
   const setSuggestion = (text: string) => {
@@ -363,7 +376,7 @@ export const App: React.FC = () => {
   return (
     <Container>
       <ChatContainer>
-        {showEmpty && messages.length === 0 ? (
+        {showEmpty ? (
           <EmptyState>
             <EmptyIcon>
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -405,10 +418,7 @@ export const App: React.FC = () => {
           </EmptyState>
         ) : (
           <>
-            {messages.map((msg, index) => (
-              <ChatMessage key={index} type={msg.type} content={msg.content} />
-            ))}
-            {(isGenerating || files.length > 0) && (
+            {(isGenerating || files.length > 0 || Boolean(error) || Boolean(currentRepo)) && (
               <GenerationSession
                 repo={currentRepo}
                 currentStage={currentStage}
@@ -417,6 +427,7 @@ export const App: React.FC = () => {
                 isComplete={isSessionComplete}
                 onFileClick={handleFileClick}
                 statusMessage={statusMessage}
+                error={error || undefined}
               />
             )}
           </>
@@ -428,7 +439,7 @@ export const App: React.FC = () => {
           <SimpleInput
             onSubmit={handleSubmit}
             disabled={isGenerating}
-            placeholder="Use /projectgen repo=<path> (relative to workspace is supported)"
+            placeholder="Use /projectgen repo=<path>"
           />
         </InputBoxDiv>
         <Toolbar>

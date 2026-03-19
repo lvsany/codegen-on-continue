@@ -94,14 +94,40 @@
   --pg-glass-bg: rgba(255, 255, 255, 0.05);
   --pg-glass-border: rgba(255, 255, 255, 0.1);
   --pg-glass-blur: blur(12px);
-}
 
-/* 🌙 深色模式适配 */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --pg-glass-bg: rgba(0, 0, 0, 0.2);
-    --pg-glass-border: rgba(255, 255, 255, 0.08);
-  }
+  /* 🧭 反馈卡片语义色（亮色模式） */
+  --pg-session-bg: rgba(255, 255, 255, 0.86);
+  --pg-session-border: rgba(15, 23, 42, 0.16);
+  --pg-session-hover-bg: rgba(248, 250, 252, 0.96);
+  --pg-session-hover-border: rgba(79, 70, 229, 0.25);
+  --pg-session-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+
+  --pg-status-bg: rgba(15, 23, 42, 0.05);
+  --pg-status-text: #334155;
+
+  --pg-stage-active-bg: rgba(79, 70, 229, 0.12);
+  --pg-stage-active-border: rgba(79, 70, 229, 0.32);
+  --pg-stage-active-text: #1e1b4b;
+  --pg-stage-hover-bg: rgba(15, 23, 42, 0.06);
+
+  --pg-stage-complete-bg: rgba(5, 150, 105, 0.16);
+  --pg-stage-complete-text: #047857;
+  --pg-stage-failed-bg: rgba(220, 38, 38, 0.16);
+  --pg-stage-failed-text: #b91c1c;
+  --pg-stage-pending-bg: rgba(15, 23, 42, 0.07);
+  --pg-stage-pending-text: #64748b;
+
+  --pg-pill-bg: rgba(15, 23, 42, 0.08);
+  --pg-pill-text: #475569;
+
+  --pg-success-panel-bg: rgba(5, 150, 105, 0.14);
+  --pg-success-panel-border: rgba(5, 150, 105, 0.34);
+  --pg-success-panel-text: #065f46;
+
+  --pg-error-panel-bg: #fde8e8;
+  --pg-error-panel-border: #f3b4b4;
+  --pg-error-panel-text: #7f1d1d;
+  --pg-error-panel-accent: #b91c1c;
 }
 
 * {

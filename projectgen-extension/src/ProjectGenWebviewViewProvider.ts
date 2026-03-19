@@ -117,6 +117,37 @@ async function formatApiError(response: { status: number; statusText: string; te
     return `服务器返回错误: ${statusPart}`;
 }
 
+function normalizeErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message.trim()) {
+        return error.message;
+    }
+
+    if (typeof error === 'string' && error.trim()) {
+        return error;
+    }
+
+    try {
+        const serialized = JSON.stringify(error);
+        if (serialized && serialized !== '{}' && serialized !== 'null') {
+            return serialized;
+        }
+    } catch {
+        // ignore serialization errors and fallback to generic string
+    }
+
+    const fallback = String(error ?? '').trim();
+    return fallback || '未知错误（未返回详细信息）';
+}
+
+function shouldShowConfigHint(errorMessage: string): boolean {
+    const msg = errorMessage.toLowerCase();
+    return msg.includes('econnrefused')
+        || msg.includes('enotfound')
+        || msg.includes('timed out')
+        || msg.includes('invalid url')
+        || msg.includes('repo_not_found');
+}
+
 export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'projectgen.chatView';
     private _view?: vscode.WebviewView;
@@ -255,10 +286,15 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
             } else {
                 this.postMessage({ type: 'error', content: `生成失败: 服务器返回格式错误` });
             }
-        } catch (error: any) {
+        } catch (error: unknown) {
+            const errorMessage = normalizeErrorMessage(error);
+            const configHint = shouldShowConfigHint(errorMessage)
+                ? '\n\n请检查服务地址配置（projectgen.serverUrl）和 repo 路径'
+                : '';
+
             this.postMessage({ 
                 type: 'error', 
-                content: `请求失败: ${error.message}\n\n请检查服务地址配置（projectgen.serverUrl）和 repo 路径` 
+                content: `请求失败: ${errorMessage}${configHint}` 
             });
         }
     }

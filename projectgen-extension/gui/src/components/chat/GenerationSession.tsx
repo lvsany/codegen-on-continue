@@ -34,13 +34,14 @@ const SessionContainer = styled.div`
   padding: 16px;
   border-radius: 12px;
   animation: ${fadeIn} 0.35s cubic-bezier(0.19, 1, 0.22, 1);
-  background: var(--pg-glass-bg, rgba(255, 255, 255, 0.02));
+  background: var(--pg-session-bg, rgba(255, 255, 255, 0.86));
   margin: 8px 0;
-  border: 1px solid var(--pg-glass-border, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--pg-session-border, rgba(15, 23, 42, 0.16));
+  box-shadow: var(--pg-session-shadow, 0 4px 14px rgba(15, 23, 42, 0.06));
   
   &:hover {
-    background: var(--pg-gray-50, rgba(255,255,255,0.04));
-    border-color: rgba(99, 102, 241, 0.15);
+    background: var(--pg-session-hover-bg, rgba(248, 250, 252, 0.96));
+    border-color: var(--pg-session-hover-border, rgba(79, 70, 229, 0.25));
   }
 `;
 
@@ -56,22 +57,11 @@ const Header = styled.div`
   margin-bottom: 12px;
 `;
 
-const SenderName = styled.span`
+const SessionTitle = styled.span`
   font-weight: 600;
   font-size: 13px;
   color: var(--vscode-foreground);
   letter-spacing: -0.01em;
-`;
-
-const RepoBadge = styled.span`
-  padding: 3px 10px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.1) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 20px;
-  font-size: 11px;
-  font-weight: 500;
-  color: #a5b4fc;
-  font-family: var(--pg-font-mono, monospace);
 `;
 
 const ThinkingIndicator = styled.div`
@@ -80,8 +70,8 @@ const ThinkingIndicator = styled.div`
   gap: 10px;
   padding: 12px 16px;
   font-size: 13px;
-  color: var(--vscode-descriptionForeground);
-  background: var(--pg-gray-50, rgba(255, 255, 255, 0.03));
+  color: var(--pg-status-text, #334155);
+  background: var(--pg-status-bg, rgba(15, 23, 42, 0.05));
   border-radius: 10px;
   margin-bottom: 12px;
 `;
@@ -114,18 +104,18 @@ const StageHeader = styled.div<{ isExpanded: boolean; isActive: boolean }>`
   padding: 10px 12px;
   cursor: pointer;
   font-size: 12px;
-  color: ${props => props.isActive ? 'var(--vscode-foreground)' : 'var(--vscode-descriptionForeground)'};
+  color: ${props => props.isActive ? 'var(--pg-stage-active-text, var(--vscode-foreground))' : 'var(--pg-stage-pending-text, var(--vscode-descriptionForeground))'};
   background: ${props => props.isActive 
-    ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%)' 
+    ? 'var(--pg-stage-active-bg, rgba(79, 70, 229, 0.12))' 
     : 'transparent'};
   border-radius: 8px;
   transition: all 0.2s cubic-bezier(0.19, 1, 0.22, 1);
   border: 1px solid ${props => props.isActive 
-    ? 'rgba(99, 102, 241, 0.2)' 
+    ? 'var(--pg-stage-active-border, rgba(79, 70, 229, 0.32))' 
     : 'transparent'};
   
   &:hover {
-    background: var(--pg-gray-100, rgba(255, 255, 255, 0.06));
+    background: var(--pg-stage-hover-bg, rgba(15, 23, 42, 0.06));
     color: var(--vscode-foreground);
   }
 `;
@@ -141,7 +131,7 @@ const ChevronIcon = styled.span<{ isExpanded: boolean }>`
   justify-content: center;
 `;
 
-const StageIcon = styled.span<{ status: 'pending' | 'active' | 'complete' }>`
+const StageIcon = styled.span<{ status: 'pending' | 'active' | 'complete' | 'failed' }>`
   font-size: 14px;
   width: 18px;
   height: 18px;
@@ -155,19 +145,24 @@ const StageIcon = styled.span<{ status: 'pending' | 'active' | 'complete' }>`
     switch (props.status) {
       case 'complete':
         return css`
-          background: rgba(16, 185, 129, 0.15);
-          color: #10b981;
+          background: var(--pg-stage-complete-bg, rgba(5, 150, 105, 0.16));
+          color: var(--pg-stage-complete-text, #047857);
         `;
       case 'active':
         return css`
-          background: rgba(99, 102, 241, 0.15);
-          color: #818cf8;
+          background: var(--pg-stage-active-bg, rgba(79, 70, 229, 0.12));
+          color: var(--pg-stage-active-text, #1e1b4b);
           animation: ${pulse} 1.5s ease-in-out infinite;
+        `;
+      case 'failed':
+        return css`
+          background: var(--pg-stage-failed-bg, rgba(220, 38, 38, 0.16));
+          color: var(--pg-stage-failed-text, #b91c1c);
         `;
       default:
         return css`
-          background: var(--pg-gray-100, rgba(255, 255, 255, 0.06));
-          color: var(--vscode-descriptionForeground);
+          background: var(--pg-stage-pending-bg, rgba(15, 23, 42, 0.07));
+          color: var(--pg-stage-pending-text, #64748b);
           opacity: 0.5;
         `;
     }
@@ -182,9 +177,10 @@ const StageName = styled.span`
 const FileCount = styled.span`
   font-size: 11px;
   padding: 2px 8px;
-  background: var(--pg-gray-100, rgba(255, 255, 255, 0.06));
+  background: var(--pg-pill-bg, rgba(15, 23, 42, 0.08));
+  color: var(--pg-pill-text, #475569);
   border-radius: 10px;
-  opacity: 0.8;
+  opacity: 0.92;
 `;
 
 const ProgressContainer = styled.div`
@@ -273,8 +269,8 @@ const CompletionMessage = styled.div`
   gap: 12px;
   padding: 14px 16px;
   margin-top: 12px;
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(6, 182, 212, 0.05) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.2);
+  background: var(--pg-success-panel-bg, rgba(5, 150, 105, 0.14));
+  border: 1px solid var(--pg-success-panel-border, rgba(5, 150, 105, 0.34));
   border-radius: 10px;
   font-size: 13px;
   animation: ${fadeIn} 0.4s cubic-bezier(0.19, 1, 0.22, 1);
@@ -293,12 +289,26 @@ const SuccessIcon = styled.span`
 `;
 
 const CompletionText = styled.span`
-  color: var(--vscode-foreground);
+  color: var(--pg-success-panel-text, var(--vscode-foreground));
   
   strong {
     color: #10b981;
     font-weight: 600;
   }
+`;
+
+const ErrorState = styled.div`
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--pg-error-panel-border, #f3b4b4);
+  background: var(--pg-error-panel-bg, #fde8e8);
+  color: var(--pg-error-panel-text, #7f1d1d);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  box-shadow: inset 0 0 0 1px rgba(185, 28, 28, 0.16);
 `;
 
 interface GenerationSessionProps {
@@ -309,6 +319,7 @@ interface GenerationSessionProps {
   isComplete: boolean;
   onFileClick: (file: GeneratedFile) => void;
   statusMessage?: string;
+  error?: string;
 }
 
 const stages = [
@@ -317,6 +328,8 @@ const stages = [
   { key: 'code', name: 'Code Generation' }
 ] as const;
 
+type StageStatus = 'pending' | 'active' | 'complete' | 'failed';
+
 export const GenerationSession: React.FC<GenerationSessionProps> = ({
   repo,
   currentStage,
@@ -324,7 +337,8 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
   files,
   isComplete,
   onFileClick,
-  statusMessage
+  statusMessage,
+  error
 }) => {
   const [expandedStages, setExpandedStages] = useState<Set<string>>(new Set(['architecture', 'skeleton', 'code']));
   
@@ -369,19 +383,29 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
     files: files.map(f => f.path)
   });
   
-  const getStageStatus = (stageKey: string): 'pending' | 'active' | 'complete' => {
+  const getStageStatus = (stageKey: string, stageFilesCount: number): StageStatus => {
     const stageOrder = ['architecture', 'skeleton', 'code'];
     const currentIndex = stageOrder.indexOf(currentStage);
     const stageIndex = stageOrder.indexOf(stageKey);
+    const hasError = Boolean(error);
     
     if (isComplete) return 'complete';
+    if (hasError) {
+      if (stageKey === currentStage) {
+        return 'failed';
+      }
+      // 失败场景下，只有有实际产出文件的阶段才标记为完成，避免假阳性“已通过”
+      return stageFilesCount > 0 ? 'complete' : 'pending';
+    }
+
     if (stageKey === currentStage) return 'active';
     if (stageIndex < currentIndex) return 'complete';
     return 'pending';
   };
 
-  const getStageIcon = (status: 'pending' | 'active' | 'complete') => {
+  const getStageIcon = (status: StageStatus) => {
     if (status === 'complete') return '✓';
+    if (status === 'failed') return '✕';
     if (status === 'active') return '◐';
     return '○';
   };
@@ -396,11 +420,10 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
     <SessionContainer>
       <ContentWrapper>
         <Header>
-          <SenderName>ProjectGen</SenderName>
-          <RepoBadge>{repo}</RepoBadge>
+          <SessionTitle>ProjectGen [{repo || '未指定路径'}]</SessionTitle>
         </Header>
         
-        {!isComplete && (statusMessage || currentStage) && (
+        {!isComplete && !error && (statusMessage || currentStage) && (
           <ThinkingIndicator>
             <Spinner />
             <ThinkingText>
@@ -411,8 +434,8 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
         
         {stages.map(stage => {
           const stageFiles = filesByStage[stage.key];
-          const status = getStageStatus(stage.key);
-          const isActive = status === 'active';
+          const status = getStageStatus(stage.key, stageFiles.length);
+          const isActive = status === 'active' || status === 'failed';
           const isStageComplete = status === 'complete';
           const isExpanded = expandedStages.has(stage.key);
           const hasFiles = stageFiles.length > 0;
@@ -442,7 +465,7 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
                 ) : null}
               </StageHeader>
               
-              {isActive && (
+              {isActive && !error && (
                 <ProgressContainer>
                   <ProgressTrack>
                     <ProgressFill progress={progress} />
@@ -484,6 +507,12 @@ export const GenerationSession: React.FC<GenerationSessionProps> = ({
               Successfully generated <strong>{files.length} files</strong> for {repo}
             </CompletionText>
           </CompletionMessage>
+        )}
+
+        {error && (
+          <ErrorState>
+            {error}
+          </ErrorState>
         )}
       </ContentWrapper>
     </SessionContainer>
