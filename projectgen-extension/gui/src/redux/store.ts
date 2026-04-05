@@ -1,9 +1,13 @@
 import { configureStore } from '@reduxjs/toolkit';
 import projectGenReducer from './slices/projectGenSlice';
+import modelConfigReducer from './slices/modelConfigSlice';
+import chatHistoryReducer from './slices/chatHistorySlice';
 
 export const store = configureStore({
   reducer: {
-    projectGen: projectGenReducer
+    projectGen: projectGenReducer,
+    modelConfig: modelConfigReducer,
+    chatHistory: chatHistoryReducer,
   }
 });
 

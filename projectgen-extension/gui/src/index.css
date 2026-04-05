@@ -1,3 +1,8 @@
+/* 🎨 Tailwind CSS */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* 🎨 ProjectGen Design System 2.0 - 对标 Cursor / Linear / Vercel */
 
 :root {

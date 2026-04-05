@@ -1,11 +1,23 @@
-import React, { useEffect, useContext, useCallback, useState } from 'react';
+import React, { useEffect, useContext, useCallback, useState, useRef } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { useAppDispatch, useAppSelector } from './redux/hooks';
 import { startGeneration, updateProgress, addFile, completeGeneration, stopGeneration, setError, setStatusMessage, resetGeneration } from './redux/slices/projectGenSlice';
+import { addUserMessage, addAssistantMessage, selectCurrentMessages, createSession, addGenerationMessage, updateGenerationMessage, clearCurrentSession } from './redux/slices/chatHistorySlice';
 import { VsCodeApiContext } from './context/VsCodeApi';
-import { SimpleInput } from './components/mainInput/SimpleInput';
-import { InputBoxDiv } from './components/mainInput/StyledComponents';
-import { GenerationSession } from './components/chat/GenerationSession';
+import { SimpleInput, SimpleInputRef } from './components/mainInput/SimpleInput';
+import { ChatHistory } from './components/chat/ChatHistory';
+import { SessionTabs } from './components/chat/SessionTabs';
+import { ModelSelector } from './components/ModelSelector';
+import type { ModelConfig } from './forms/AddModelForm';
+import {
+  GradientBorder,
+  InputBoxInner,
+  InputToolbar,
+  ToolbarLeft,
+  ToolbarRight,
+  HoverItem,
+  SubmitButton,
+} from './components/mainInput/ContinueStyleInput';
 
 // 🎬 动画
 const fadeIn = keyframes`
@@ -56,74 +68,22 @@ const ChatContainer = styled.div`
 const InputContainer = styled.div`
   position: relative;
   z-index: 1;
-  border-top: 1px solid var(--pg-glass-border, rgba(255, 255, 255, 0.08));
-  padding: 16px 20px;
-  background: var(--pg-glass-bg, rgba(255, 255, 255, 0.02));
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  padding: 12px 16px;
 `;
 
-// 工具栏
-const Toolbar = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 4px 0;
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-`;
-
-const ToolbarHint = styled.span`
-  flex: 1;
-  opacity: 0.6;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+// 编辑区域样式
+const EditorArea = styled.div`
+  min-height: 40px;
+  max-height: 200px;
+  overflow-y: auto;
   
-  kbd {
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: var(--pg-gray-100, rgba(255, 255, 255, 0.06));
-    border: 1px solid var(--pg-gray-200, rgba(255, 255, 255, 0.09));
-    font-family: var(--pg-font-mono, monospace);
-    font-size: 10px;
-  }
-`;
-
-const ToolbarButton = styled.button<{ variant?: 'danger' | 'default' }>`
-  padding: 6px 12px;
-  background: ${props => props.variant === 'danger' 
-    ? 'rgba(239, 68, 68, 0.12)' 
-    : 'var(--pg-gray-100, rgba(255, 255, 255, 0.06))'};
-  color: ${props => props.variant === 'danger' 
-    ? '#ef4444' 
-    : 'var(--vscode-foreground)'};
-  border: 1px solid ${props => props.variant === 'danger'
-    ? 'rgba(239, 68, 68, 0.2)'
-    : 'var(--pg-gray-200, rgba(255, 255, 255, 0.09))'};
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 500;
-  transition: all 0.2s cubic-bezier(0.19, 1, 0.22, 1);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  
-  &:hover:not(:disabled) {
-    background: ${props => props.variant === 'danger'
-      ? 'rgba(239, 68, 68, 0.2)'
-      : 'var(--pg-gray-200, rgba(255, 255, 255, 0.1))'};
-    transform: translateY(-1px);
+  &::-webkit-scrollbar {
+    width: 4px;
   }
   
-  &:active:not(:disabled) {
-    transform: translateY(0);
-  }
-  
-  &:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  &::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
   }
 `;
 
@@ -236,9 +196,27 @@ const SuggestionText = styled.div`
 export const App: React.FC = () => {
   const dispatch = useAppDispatch();
   const vscode = useContext(VsCodeApiContext);
-  const { isGenerating, currentStage, progress, files, currentRepo, statusMessage, error } = useAppSelector((state) => state.projectGen);
+  const { isGenerating, files } = useAppSelector((state) => state.projectGen);
+  const { currentConfig } = useAppSelector((state) => state.modelConfig);
+  const chatMessages = useAppSelector(selectCurrentMessages);
+  const currentSessionId = useAppSelector((state) => state.chatHistory.currentSessionId);
   const [showEmpty, setShowEmpty] = useState(true);
-  const [isSessionComplete, setIsSessionComplete] = useState(false);
+  const inputRef = useRef<SimpleInputRef>(null);
+
+  // 初始化：如果没有会话，创建一个
+  useEffect(() => {
+    if (!currentSessionId) {
+      dispatch(createSession('Welcome'));
+    }
+  }, [currentSessionId, dispatch]);
+
+  // Notify VS Code when model config changes
+  const handleModelChange = useCallback((config: ModelConfig) => {
+    vscode?.postMessage({
+      type: 'modelConfigChanged',
+      config,
+    });
+  }, [vscode]);
   
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -251,27 +229,57 @@ export const App: React.FC = () => {
             stage: message.content.stage,
             progress: message.content.progress
           }));
+          // 更新生成消息的进度
+          dispatch(updateGenerationMessage({
+            currentStage: message.content.stage,
+            progress: message.content.progress,
+          }));
           break;
         case 'newFile':
           dispatch(addFile(message.content));
+          // 更新生成消息的文件列表
+          dispatch(updateGenerationMessage({
+            files: [...files, message.content],
+          }));
           break;
         case 'files':
           dispatch(completeGeneration());
-          setIsSessionComplete(true);
+          {
+            const completedFiles = Array.isArray(message.content?.files)
+              ? message.content.files
+              : files;
+            const completedRepo = typeof message.content?.repo === 'string'
+              ? message.content.repo
+              : undefined;
+
+            // 更新生成消息为完成状态
+            dispatch(updateGenerationMessage({
+              isComplete: true,
+              files: completedFiles,
+              ...(completedRepo ? { repo: completedRepo } : {}),
+            }));
+          }
           break;
         case 'error':
           dispatch(setError(message.content));
+          // 更新生成消息为错误状态
+          dispatch(updateGenerationMessage({
+            error: message.content,
+          }));
           break;
         case 'info':
-          // Info 消息直接更新到 statusMessage，显示在 GenerationSession 中
+          // Info 消息更新到生成消息的状态
           dispatch(setStatusMessage(message.content));
+          dispatch(updateGenerationMessage({
+            statusMessage: message.content,
+          }));
           break;
       }
     };
     
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [dispatch]);
+  }, [dispatch, files]);
   
   const handleFileClick = useCallback((file: any) => {
     vscode?.postMessage({
@@ -326,39 +334,50 @@ export const App: React.FC = () => {
     
   const handleSubmit = useCallback((message: string) => {
     setShowEmpty(false);
-    setIsSessionComplete(false);
+    
+    // 添加用户消息到聊天历史
+    dispatch(addUserMessage(message));
 
     const parsed = parseCommand(message);
     
     if (parsed.isCommand) {
       dispatch(startGeneration(parsed.repo || '未指定路径'));
+      
+      // 添加生成消息（不再添加助手消息）
+      dispatch(addGenerationMessage({
+        repo: parsed.repo || 'repository',
+        content: `Starting project generation for: ${parsed.repo || 'repository'}...`
+      }));
 
       if (parsed.repo) {
         vscode?.postMessage({
           type: 'generateFromRepo',
           repo: parsed.repo,
           commandType: parsed.type,
-          message: parsed.originalMessage
+          message: parsed.originalMessage,
+          modelConfig: currentConfig,
         });
         return;
       }
 
       vscode?.postMessage({
         type: 'generate',
-        message: message
+        message: message,
+        modelConfig: currentConfig,
       });
       return;
     }
 
-    vscode?.postMessage({
-      type: 'generate',
-      message: message
-    });
-  }, [dispatch, vscode]);
+    // 普通消息：添加简单助手响应
+    dispatch(addAssistantMessage(`I received your message: "${message.slice(0, 100)}${message.length > 100 ? '...' : ''}"\n\nTo generate a project, use: /projectgen repo=<path>`));
+    
+    // 不发送到后端（目前只支持 /projectgen 命令）
+  }, [dispatch, vscode, currentConfig]);
   
   const handleClear = useCallback(() => {
     setShowEmpty(true);
-    setIsSessionComplete(false);
+    inputRef.current?.clear();
+    dispatch(clearCurrentSession());
     dispatch(resetGeneration());
   }, [dispatch]);
   
@@ -372,11 +391,17 @@ export const App: React.FC = () => {
   const setSuggestion = (text: string) => {
     handleSubmit(text);
   };
+
+  // 检查是否有对话历史
+  const hasHistory = chatMessages.length > 0;
   
   return (
     <Container>
+      {/* Session Tabs - Continue 风格 */}
+      <SessionTabs />
+      
       <ChatContainer>
-        {showEmpty ? (
+        {showEmpty && !hasHistory ? (
           <EmptyState>
             <EmptyIcon>
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -418,45 +443,67 @@ export const App: React.FC = () => {
           </EmptyState>
         ) : (
           <>
-            {(isGenerating || files.length > 0 || Boolean(error) || Boolean(currentRepo)) && (
-              <GenerationSession
-                repo={currentRepo}
-                currentStage={currentStage}
-                progress={progress}
-                files={files}
-                isComplete={isSessionComplete}
-                onFileClick={handleFileClick}
-                statusMessage={statusMessage}
-                error={error || undefined}
-              />
-            )}
+            {/* 统一时间线：聊天历史 + 生成进度 */}
+            <ChatHistory 
+              messages={chatMessages} 
+              isStreaming={isGenerating}
+              onFileClick={handleFileClick}
+            />
           </>
         )}
       </ChatContainer>
       
       <InputContainer>
-        <InputBoxDiv className={isGenerating ? 'generating' : ''}>
-          <SimpleInput
-            onSubmit={handleSubmit}
-            disabled={isGenerating}
-            placeholder="Use /projectgen repo=<path>"
-          />
-        </InputBoxDiv>
-        <Toolbar>
-          <ToolbarHint>
-            <kbd>↵</kbd> to send · <kbd>⇧↵</kbd> for new line
-          </ToolbarHint>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {isGenerating && (
-              <ToolbarButton variant="danger" onClick={handleStop}>
-                ■ Stop
-              </ToolbarButton>
-            )}
-            <ToolbarButton onClick={handleClear} disabled={isGenerating}>
-              ↻ Clear
-            </ToolbarButton>
-          </div>
-        </Toolbar>
+        {/* Continue 风格的渐变边框输入框 */}
+        <GradientBorder loading={isGenerating}>
+          <InputBoxInner>
+            {/* 编辑器区域 */}
+            <EditorArea>
+              <SimpleInput
+                ref={inputRef}
+                onSubmit={handleSubmit}
+                disabled={isGenerating}
+                placeholder="Use /projectgen repo=<path>"
+              />
+            </EditorArea>
+            
+            {/* 工具栏 - Continue InputToolbar 风格 */}
+            <InputToolbar>
+              <ToolbarLeft>
+                {/* 模型选择器 - 紧凑模式 */}
+                <ModelSelector onModelChange={handleModelChange} compact />
+              </ToolbarLeft>
+              
+              <ToolbarRight>
+                {/* 快捷键提示 */}
+                <span style={{ color: 'var(--vscode-descriptionForeground)', opacity: 0.6, fontSize: '10px' }}>
+                  ⏎ Enter to send
+                </span>
+                
+                {/* 停止按钮 */}
+                {isGenerating && (
+                  <HoverItem onClick={handleStop} style={{ color: '#ef4444' }}>
+                    ■ Stop
+                  </HoverItem>
+                )}
+                
+                {/* 清除按钮 */}
+                <HoverItem onClick={handleClear} disabled={isGenerating}>
+                  ↻ Clear
+                </HoverItem>
+                
+                {/* 发送按钮 */}
+                <SubmitButton 
+                  variant="primary" 
+                  disabled={isGenerating}
+                  onClick={() => inputRef.current?.submit()}
+                >
+                  ⏎ Send
+                </SubmitButton>
+              </ToolbarRight>
+            </InputToolbar>
+          </InputBoxInner>
+        </GradientBorder>
       </InputContainer>
     </Container>
   );

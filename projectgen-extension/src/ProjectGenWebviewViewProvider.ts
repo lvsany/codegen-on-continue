@@ -189,6 +189,9 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
                 case 'stopGeneration':
                     this.handleStopGeneration();
                     break;
+                case 'modelConfigChanged':
+                    this.handleModelConfigChanged(data.config);
+                    break;
             }
         });
     }
@@ -196,6 +199,14 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
     private _currentProjectId: string | null = null;
     private _currentRepoName: string | null = null;  // 跟踪当前项目名称
     private _currentOutputDir: string | null = null;
+    private _currentModelConfig: any = null;  // Store current model config
+
+    private handleModelConfigChanged(config: any) {
+        console.log('[ProjectGen] Model config changed:', config);
+        this._currentModelConfig = config;
+        // Optionally show a notification
+        // vscode.window.showInformationMessage(`Model changed to: ${config?.title || config?.model || 'Unknown'}`);
+    }
 
     private getServerUrl(): string {
         const configuredUrl = vscode.workspace.getConfiguration('projectgen').get<string>('serverUrl', 'http://localhost:5002');
@@ -258,8 +269,12 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
             : path.resolve(workspaceRoot, trimmedRepoInput);
         console.log('[ProjectGen] Processing repo path:', resolvedPreviewPath);
 
+        // Get model config from message or use stored config
+        const modelConfig = data.modelConfig || this._currentModelConfig;
+        console.log('[ProjectGen] Using model config:', modelConfig);
+
         try {
-            this.postMessage({ type: 'info', content: `正在从路径生成项目: ${resolvedPreviewPath}` });
+            this.postMessage({ type: 'info', content: `正在从路径生成项目: ${resolvedPreviewPath} (使用模型: ${modelConfig?.title || modelConfig?.model || 'gpt-4o'})` });
 
             const response = await httpRequest(`${this.getServerUrl()}/api/projects/generate`, {
                 method: 'POST',
@@ -268,7 +283,10 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
                     repo_path: trimmedRepoInput,
                     workspace_root: workspaceRoot,
                     requirement: data.message || `Generate project for ${path.basename(resolvedPreviewPath)}`,
-                    model: 'gpt-4o'
+                    model: modelConfig?.model || 'gpt-4o',
+                    provider: modelConfig?.provider || 'openai',
+                    api_key: modelConfig?.apiKey || undefined,
+                    api_base: modelConfig?.apiBase || undefined,
                 })
             });
 
@@ -420,7 +438,7 @@ export class ProjectGenWebviewViewProvider implements vscode.WebviewViewProvider
                 }
             });
         } catch (error: any) {
-            this.postMessage({ type: 'result', content: '✅ 项目生成完成！' });
+            this.postMessage({ type: 'result', content: '项目生成完成。' });
         }
     }
 

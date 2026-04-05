@@ -7,7 +7,7 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "/Users/lv.sany/Documents/Uni_workplace/sci/AI4SE/codegen-on-continue"
+        "/Users/lv.sany/Desktop/sci/AI4SE/codegen-on-continue"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"

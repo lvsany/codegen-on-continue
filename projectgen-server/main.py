@@ -130,6 +130,10 @@ class GenerateRequest(BaseModel):
     workspace_root: str = ""
     requirement: str = ""
     model: str = "gpt-4o"
+    # New fields for model configuration
+    provider: str = "openai"
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
 
 
 class ProjectStatus(BaseModel):
@@ -271,6 +275,14 @@ async def generate_project(request: GenerateRequest):
         "repo_dir": repo_output_dir,
         "dataset": dataset
     }
+
+    # Model configuration for workflow
+    model_config = {
+        "model": request.model,
+        "provider": request.provider,
+        "api_key": request.api_key,
+        "api_base": request.api_base,
+    }
     
     # 记录任务信息
     status_file = os.path.join(repo_output_dir, "tmp_files", TASK_STATUS_FILE_NAME)
@@ -289,12 +301,13 @@ async def generate_project(request: GenerateRequest):
         "worker_process": None,
         "worker_pid": None,
         "created_at": datetime.now().isoformat(),
-        "message": "Task created, waiting to start..."
+        "message": "Task created, waiting to start...",
+        "model_config": model_config,  # Store model config
     }
 
     worker_process = Process(
         target=run_workflow_process,
-        args=(project_id, initial_state, status_file),
+        args=(project_id, initial_state, status_file, model_config),
         daemon=True
     )
     worker_process.start()
@@ -313,9 +326,34 @@ async def generate_project(request: GenerateRequest):
     }
 
 
-def run_workflow_process(project_id: str, initial_state: dict, status_file: str):
+def run_workflow_process(project_id: str, initial_state: dict, status_file: str, model_config: dict = None):
     # 在独立进程中执行，可被 cancel 接口强制终止
     # 运行工作流并将结果写入状态文件。
+
+    # Apply model configuration to environment if provided
+    if model_config:
+        if model_config.get("api_key"):
+            # Set API key based on provider
+            provider = model_config.get("provider", "openai")
+            if provider == "openai":
+                os.environ["OPENAI_API_KEY"] = model_config["api_key"]
+            elif provider == "anthropic":
+                os.environ["ANTHROPIC_API_KEY"] = model_config["api_key"]
+            elif provider == "deepseek":
+                os.environ["DEEPSEEK_API_KEY"] = model_config["api_key"]
+        
+        if model_config.get("api_base"):
+            provider = model_config.get("provider", "openai")
+            if provider == "openai" or provider == "openai-compatible":
+                os.environ["OPENAI_API_BASE"] = model_config["api_base"]
+            elif provider == "ollama":
+                os.environ["OLLAMA_BASE_URL"] = model_config["api_base"]
+
+        # Store model name for workflow to use
+        if model_config.get("model"):
+            os.environ["PROJECTGEN_MODEL"] = model_config["model"]
+            os.environ["PROJECTGEN_PROVIDER"] = model_config.get("provider", "openai")
+
     from workflow import build_graph
 
     try:
