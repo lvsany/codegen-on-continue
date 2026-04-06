@@ -119,7 +119,7 @@ class Test:
                 for k, v in self.env_vars.items():
                     env[k] = v
             process = subprocess.Popen(
-                ["pytest", "--cov=.", test_mode],
+                ["pytest", test_mode],
                 cwd=path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
             )
         else:
@@ -154,10 +154,5 @@ class Test:
             test_output = f"[check test] Errors occurred during test execution, causing the test cases to fail to run as expected.\n{check_test_output}"
         else:
             test_output = f"[check test] Passed {passed} out of {total} test cases.\n{check_test_output}"
-
-        # test_msg = "**[Evaluation results]**\n\n"
-        # test_msg += test_output
-        # if self.logger:
-        #     self.logger.info(test_msg)
 
         return test_output, error, passed, total

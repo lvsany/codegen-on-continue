@@ -1,184 +1,306 @@
-from langchain.chains.llm import LLMChain
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableWithMessageHistory
-from langchain.memory import ConversationBufferMemory
-from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from prompts import *
-from logger import get_logger
-from utils import *
+from langchain.tools import tool
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ProviderStrategy
+from functools import partial
+from utils.logger import get_logger
+from utils.general_utils import *
 import logging
 import os
 import re
 import json
 from deepdiff import DeepDiff
-from memory_manager.skeleton_memory import get_session_history
-from generation_schema import SKELETON_JSON_SCHEMA
-from prompt_templates.skeleton_prompts import SkeletonPrompts
+import difflib
+from utils.generation_schema import SKELETON_JSON_SCHEMA
+from utils.global_state import update_global_state, get_global_state, get_state_value
+from prompt_templates.skeleton_prompts import SkeletonPrompts, GetSkeletonFilesToUpdatePrompts
 from callbacks.agent_metrics_handler import AgentMetricsHandler
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Literal
+from memory_manager.skeleton_shared_memory import SharedStepSkeletonRecord, load_skeleton_step, save_skeleton_step, update_skeleton_step
+from memory_manager.arch_shared_memory import SharedStepArchRecord, load_arch_step
+from pydantic import BaseModel, Field
+
+class SkeletonCodeSchema(BaseModel):
+    path: str = Field(description="The file path of the code file.")
+    skeleton_code: str = Field(description="The skeleton code for the file, with function bodies replaced with `pass`.")
+
+class SkeletonFileUpdateItem(BaseModel):
+    path: str = Field(description="The file path of the skeleton file to be updated.")
+    action: Literal["modify", "create", "remove"] = Field(description="The action to perform on the skeleton file.")
+    rationale: str = Field(description="The rationale for updating the file.")
+    suggestion: str = Field(description="The suggestion for modifying the file.")
+
+class SkeletonFileUpdateSchema(BaseModel):
+    files_to_update: List[SkeletonFileUpdateItem] = Field(description="The skeleton files to be updated.")
+
+@tool(description="Convert the current project ssat structure into the format {path: [symbols]} and return a dict.\nSymbols include function names, class names, class methods (in the form of class.method), and class attributes (in the form of class.attribute).")
+def flatten_ssat_symbols() -> dict:
+    """
+    Convert the current project ssat structure into the format {path: [symbols]} and return a dict.
+    Symbols include function names, class names, class methods (in the form of class.method), and class attributes (in the form of class.attribute).
+    """
+    ssat = get_state_value("ssat")
+    flat = {}
+    for module in ssat.get("modules", []):
+        for file in (module.get("files") or []):
+            path = file.get("path")
+            symbols = []
+            
+            for func in (file.get("functions") or []):
+                if "name" in func:
+                    symbols.append(func["name"])
+            
+            for cls in (file.get("classes") or []):
+                cls_name = cls.get("name")
+                if cls_name:
+                    symbols.append(cls_name)
+                    
+                    for attr in (cls.get("attributes") or []):
+                        attr_name = attr.get("name")
+                        if attr_name:
+                            symbols.append(f"{cls_name}.{attr_name}")
+                    
+                    for method in (cls.get("methods") or []):
+                        method_name = method.get("name")
+                        if method_name:
+                            symbols.append(f"{cls_name}.{method_name}")
+            flat[path] = symbols
+    return flat
+
+@tool(description="Search for the corresponding 'file' node in SSAT based on the file path, and return all content of that node.")
+def find_ssat_of_file_by_path(path: str) -> dict:
+    """Search for the corresponding "file" node in SSAT based on the file path, and return all content of that node."""
+    ssat = get_state_value("ssat")
+    for module in ssat.get("modules", []):
+        for file in (module.get("files") or []):
+            if file.get("path") == path:
+                return file
+    return None
+
+@tool(description="Return the skeleton code of the given path.")
+def find_skeleton_of_file_by_path(path: str) -> dict:
+    """Return the skeleton code of the given path."""
+    skeleton = get_state_value("skeleton_by_path")
+    if skeleton:
+        if path in skeleton.keys():
+            return skeleton[path]["skeleton_code"]
+    return None
 
 
 class SkeletonAgent:
 
     def __init__(self, llm):
-        self.base_llm = llm
-        self.model = self.base_llm.with_structured_output(SKELETON_JSON_SCHEMA, method="json_schema")
-        self.clean_history_runnable = RunnableLambda(clean_history)
+        self.model = llm
         self.logger = get_logger()
         self.metrics_handler = AgentMetricsHandler()
         self.skeleton_json_dir_suffix = "/tmp_files"
+        
+        self.tools = [find_ssat_of_file_by_path, find_skeleton_of_file_by_path, flatten_ssat_symbols]
 
-    def get_session_id(self, repo_name: str) -> str:
-        return f"skeleton_agent_{repo_name}"
+        self.agent_chain_with_tools = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=SkeletonPrompts.get_system_prompt(),
+            response_format=ProviderStrategy(SkeletonCodeSchema)
+        ).with_config(callbacks=[self.metrics_handler])
 
-    def init_skeleton_chain(self, input_key: str) -> RunnableWithMessageHistory:
-        prompt = SkeletonPrompts.init_prompt()
-        skeleton_chain = RunnableWithMessageHistory(
-            prompt | self.model,
-            get_session_history=get_session_history,
-            input_messages_key=input_key,
-            history_messages_key="history"
-        )
-        return skeleton_chain
+        self.agent_chain_with_tools_for_get_files_to_update = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=GetSkeletonFilesToUpdatePrompts.get_system_prompt(),
+            response_format=ProviderStrategy(SkeletonFileUpdateSchema)
+        ).with_config(callbacks=[self.metrics_handler])
 
-    def iter_skeleton_chain(self, input_key: str) -> RunnableWithMessageHistory:
-        prompt = SkeletonPrompts.iter_prompt()
-        skeleton_iter_chain = RunnableWithMessageHistory(
-            self.clean_history_runnable | prompt | self.model,
-            get_session_history=get_session_history,
-            input_messages_key=input_key,
-            history_messages_key="history"
-        )
-        return skeleton_iter_chain
+    def generate_first_skeleton(self, ssat: Dict[str, Any]) -> List[Dict[str, Any]]:
+        skeleton_by_path = {}
 
-    def process_file_skeleton(self, chain, input_data: Dict[str, Any], session_id: str, steps: int, feedback: str = "") -> Optional[Dict[str, Any]]:
-        try:
-            self.logger.info(f"[Skeleton Agent] Processing file: {input_data['file_item']['path']}")
-            config = {
-                "configurable": {"session_id": session_id, "agent": "skeleton_agent", "step": steps},
-                "callbacks": [self.metrics_handler]
+        for module in ssat.get("modules", []):
+            files = (module.get("files") or [])
+            for file_item in files:
+                path = file_item['path']
+                if path.endswith(".py"):
+
+                    self.logger.info(f"[Skeleton Agent] Processing file: {path}")
+
+                    result = invoke_with_retry(
+                        self.agent_chain_with_tools,
+                        {
+                            "messages": SkeletonPrompts.get_init_human_prompt().format_messages(
+                                path=path,
+                                file_ssat=json.dumps(file_item, ensure_ascii=False, indent=2)
+                            )
+                        }
+                    )
+
+                    file_skeleton: SkeletonCodeSchema = result["structured_response"]
+                    file_skeleton_dict = file_skeleton.model_dump()
+                    skeleton_by_path[file_skeleton_dict['path']] = file_skeleton_dict
+                    update_global_state({"skeleton_by_path": skeleton_by_path})
+                    
+        return list(skeleton_by_path.values())
+
+
+    def generate_iter_skeleton(self, repo_name: str, ssat: Dict[str, Any], steps: int) -> List[Dict[str, Any]]:
+        # get files to update
+        prev_step = load_skeleton_step(session_id=f"skeleton_shared_{repo_name}", step=steps-1)
+        latest_skeleton = prev_step.generated_skeleton
+        suggested_changes = prev_step.feedbacks.get("text", "")
+        result = invoke_with_retry(
+            self.agent_chain_with_tools_for_get_files_to_update,
+            {
+                "messages": GetSkeletonFilesToUpdatePrompts.get_human_prompt().format_messages(
+                    suggested_changes=suggested_changes
+                )
             }
-            # 迭代步骤添加feedback到config
-            if feedback:
-                config["configurable"]["feedback"] = feedback
-            
-            result = chain.invoke(input_data, config=config)
-            return result
-        except Exception as e:
-            self.logger.error(f"[Skeleton Agent] Error in step {steps} when generating skeleton for file {input_data['file_item'].get('path', '')}: {e}")
-            # TODO: 增加错误处理，当无法正常生成时不要直接跳过，继续重新生成
-            return None
-
-    def generate_first_skeleton(self, latest_arch: Dict[str, Any], session_id: str, steps: int) -> List[Dict[str, Any]]:
-        # TODO: context怎么给？
-        context = []
-        input_key = "latest_arch"
-        skeleton_chain = self.init_skeleton_chain(input_key)
-
-        # 原先：先将ssat中的所有file都收集在一个list中，然后逐个生成
-        # 现在：按照module顺序，依次处理每个module下的file，保持一定的上下文连续性
-        for module in latest_arch.get("modules", []):
-            files = module.get("files", [])
-            for file_item in files:
-                input_data = {
-                    "file_item": file_item,
-                    "context": context,
-                    "step": steps
-                }
-                result = self.process_file_skeleton(skeleton_chain, input_data, session_id, steps)
-                if result:
-                    file_item["skeleton_code"] = result["skeleton_code"]
-                    context.append(result)
-                else:
-                    file_item["skeleton_code"] = ""
-
-        memory = get_session_history(session_id)
-        memory.save_context({"step": steps}, {"result": context})
-
-        return context
-
-    def generate_iter_skeleton(self, latest_arch: Dict[str, Any], latest_skeleton: List[Dict[str, Any]], feedback: str, session_id: str, steps: int) -> Tuple[List[Dict[str, Any]], str]:
-        context: List[Dict[str, Any]] = []
-        input_key = "latest_arch"
-        skeleton_iter_chain = self.iter_skeleton_chain(input_key)
-
-        memory = get_session_history(session_id)
-        history_str = memory.load_memory_variables({"feedback": feedback})["history"]
-
-        for module in latest_arch.get("modules", []):
-            files = module.get("files", [])
-            for file_item in files:
-                input_data = {
-                    "previous_skeleton": latest_skeleton,
-                    "file_item": file_item,
-                    "context": context,
-                    "feedback": feedback,
-                    "step": steps,
-                    "history_str": history_str
-                }
-                result = self.process_file_skeleton(skeleton_iter_chain, input_data, session_id, steps, feedback)
-                if result:
-                    file_item["skeleton_code"] = result["skeleton_code"]
-                    context.append(result)
-                else:
-                    file_item["skeleton_code"] = ""
-
-        skeleton_diff = ""
-        if context:
-            skeleton_diff = json.dumps(DeepDiff(latest_skeleton, context, ignore_order=True), indent=2, default=str)
-
-        memory.save_context(
-            {"step": steps, "previous_skeleton": latest_skeleton, "feedback": feedback},
-            {"result": context, "skeleton_diff": skeleton_diff}
         )
 
-        return context, skeleton_diff
+        files_to_update_response: SkeletonFileUpdateSchema = result['structured_response']
+        files_to_update = files_to_update_response.model_dump()['files_to_update']
 
-    def save_skeleton_json(self, repo_dir: str, steps: int, context: list) -> None:
+        skeleton_by_path: Dict[str, Dict[str, Any]] = {
+            item["path"]: dict(item)
+            for item in latest_skeleton
+            if "path" in item
+        }
+        
+        for file_item in files_to_update:
+            path = file_item["path"]
+            self.logger.info(f"[Skeleton Agent] Processing file: {path}")
+            
+            if file_item['action'] == 'remove':
+                if path in skeleton_by_path:
+                    skeleton_by_path.pop(path)
+                continue
+
+            prev_item = skeleton_by_path.get(path)
+            if prev_item:
+                previous_file_skeleton = f'File: {path}\n```python\n{prev_item["skeleton_code"]}\n```\n'
+            else:
+                previous_file_skeleton = f"No previous skeleton for {path} available."
+                
+            file_ssat = ''
+            for module in ssat.get("modules", []):
+                for file in (module.get("files") or []):
+                    if file.get("path") == path:
+                        file_ssat = json.dumps(file, ensure_ascii=False, indent=2)
+
+            result = invoke_with_retry(
+                self.agent_chain_with_tools,
+                {
+                    "messages": SkeletonPrompts.get_iter_human_prompt().format_messages(
+                        path=path,
+                        previous_file_skeleton=previous_file_skeleton,
+                        file_ssat=file_ssat,
+                        action=file_item['action'],
+                        rationale=file_item['rationale'],
+                        suggestion=file_item['suggestion']
+                    )
+                }
+            )
+
+            file_skeleton: SkeletonCodeSchema = result["structured_response"]
+            file_skeleton_dict = file_skeleton.model_dump()
+            if path in skeleton_by_path.keys():
+                skeleton_by_path.pop(path)
+            skeleton_by_path[file_skeleton_dict['path']] = file_skeleton_dict
+            update_global_state({"skeleton_by_path": skeleton_by_path})
+
+        return list(skeleton_by_path.values())
+    
+    def _update_shared_skeleton_memory(self, repo_name: str, repo_dir: str, steps: int, skeleton: List[Dict[str, Any]]) -> None:
+        shared_session_id = f"skeleton_shared_{repo_name}"
+
+        if steps == 1:
+            record = SharedStepSkeletonRecord(
+                step=steps,
+                generated_skeleton=skeleton,
+                feedbacks=None
+            )
+            try:
+                save_skeleton_step(shared_session_id, repo_dir, record)
+            except Exception as e:
+                self.logger.error(f"[Skeleton Agent] Error in saving shared step record at step {steps}: {e}")
+
+        else:
+            prev_skeleton = load_skeleton_step(shared_session_id, step=steps-1).generated_skeleton
+            prev_skeleton_map = {
+                item["path"]: item.get("skeleton_code", "")
+                for item in prev_skeleton
+                if "path" in item
+            }
+
+            updated_skeleton = []
+            for item in skeleton:
+                path = item.get("path")
+                current_skeleton = item.get("skeleton_code", "")
+
+                new_item = dict(item)  
+
+                if path in prev_skeleton_map:
+                    prev_file_skeleton = prev_skeleton_map[path]
+                else:
+                    prev_file_skeleton = ""
+
+                skeleton_diff = difflib.unified_diff(
+                    prev_file_skeleton.splitlines(),
+                    current_skeleton.splitlines(),
+                    fromfile="previous",
+                    tofile="current",
+                )
+                
+                skeleton_diff_str = "\n".join(skeleton_diff)
+                new_item["diff"] = skeleton_diff_str
+                updated_skeleton.append(new_item)
+
+            record = SharedStepSkeletonRecord(
+                step=steps,
+                generated_skeleton=updated_skeleton,
+                feedbacks=None
+            )
+            try:
+                save_skeleton_step(shared_session_id, repo_dir, record)
+            except Exception as e:
+                self.logger.error(f"[Skeleton Agent] Error in updating shared step record at step {steps}: {e}")
+
+
+    def save_skeleton_json(self, repo_dir: str, steps: int, skeleton: list) -> None:
         skeleton_json_dir = f"{repo_dir}{self.skeleton_json_dir_suffix}"
-        # 确保目录存在
         os.makedirs(skeleton_json_dir, exist_ok=True)
         skeleton_json_path = f"{skeleton_json_dir}/skeleton_{steps}.json"
 
         try:
             with open(skeleton_json_path, "w", encoding="utf-8") as f:
-                json.dump(context, f, indent=2, ensure_ascii=False)
+                json.dump(skeleton, f, indent=2, ensure_ascii=False)
             self.logger.info(f"[Skeleton Agent] Skeleton JSON saved to {skeleton_json_path}")
         except Exception as e:
-            self.logger.error(f"[Skeleton Agent] Could not save skeleton JSON to file: {e}")
+            self.logger.warning(f"[Skeleton Agent] Could not save skeleton JSON to file: {e}")
+
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        dataset = state["dataset"]
         repo_name = state["repo_name"]
         repo_dir = state["repo_dir"]
-        code_file_DAG = state["code_file_DAG"]
-        latest_arch = state["latest_arch"]
-        latest_skeleton = state.get("latest_skeleton", [])
         steps = state.get("skeleton_steps", 0) + 1
-        feedback = state.get("skeleton_feedback", "")
-        session_id = self.get_session_id(repo_name)
 
         self.logger.info(f"==========SKELETON GENERATION IN STEP {steps}===========")
 
-        if steps == 1:
-            skeleton = self.generate_first_skeleton(latest_arch, session_id, steps)
-        else:
-            skeleton, _ = self.generate_iter_skeleton(latest_arch, latest_skeleton, feedback, session_id, steps)
+        ssat = load_arch_step(session_id=f"arch_shared_{repo_name}").ssat
 
+        if steps == 1:
+            skeleton = self.generate_first_skeleton(ssat)
+        else:
+            skeleton = self.generate_iter_skeleton(repo_name, ssat, steps)
+
+        self._update_shared_skeleton_memory(repo_name, repo_dir, steps, skeleton)
         self.save_skeleton_json(repo_dir, steps, skeleton)
 
         updated_state = {
             **state,
-            "repo_name": repo_name,
-            "repo_dir": repo_dir,
-            "code_file_DAG": code_file_DAG,
-            "latest_arch": latest_arch,
-            "latest_skeleton": skeleton,
-            "skeleton_steps": steps,
-            "dataset": dataset
+            "skeleton_steps": steps
         }
+        update_global_state({"skeleton_steps": steps})
         return updated_state

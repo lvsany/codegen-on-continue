@@ -1,9 +1,10 @@
 # from workflow import build_graph
 import os
 import json
-from logger import get_logger
+from utils.logger import get_logger
 import argparse
 from callbacks.agent_metrics_handler import AgentMetricsHandler
+from utils.global_state import set_global_state
 
 
 
@@ -11,15 +12,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=False, default="DevBench")
+    parser.add_argument("--output_dir", type=str, required=False, default="gpt-5")
     args = parser.parse_args()
     dataset = args.dataset
+    output_dir = args.output_dir
 
-    model = "gpt-4o"
-    os.makedirs(f'../{dataset}_outputs/{model}', exist_ok=True)
-    log_path = f'../{dataset}_outputs/{model}/test_log.log'
+    os.makedirs(f'../outputs/{dataset}_outputs/{output_dir}', exist_ok=True)
+    log_path = f'../outputs/{dataset}_outputs/{output_dir}/test_log.log'
     logger = get_logger(log_path)
-
-    AgentMetricsHandler.set_global_log_file(os.path.expanduser(f"../{dataset}_outputs/{model}/agent_metrics.log"))
     
     from workflow import build_graph
 
@@ -35,11 +35,12 @@ if __name__ == "__main__":
     except:
         pass
     repo_list.sort()
-    
-    
+
     for repo_name in repo_list:
         logger.info(f"Processing repository: {repo_name}")
-        os.makedirs(f'../{dataset}_outputs/{model}/{repo_name}/tmp_files', exist_ok=True)
+        os.makedirs(f'../outputs/{dataset}_outputs/{output_dir}/{repo_name}/tmp_files', exist_ok=True)
+        
+        AgentMetricsHandler.set_global_log_file(os.path.expanduser(f"../outputs/{dataset}_outputs/{output_dir}/{repo_name}/tmp_files/agent_metrics.log"))
         repo_dir = os.path.join(dataset_dir, repo_name)
         repo_config = json.load(open(os.path.join(repo_dir, "config.json"), "r"))
         
@@ -57,8 +58,22 @@ if __name__ == "__main__":
             uml_sequence = ""
         arch_design = open(os.path.join(repo_dir, repo_config['architecture_design']), "r").read()
 
-        final_state = app.invoke({"user_input": requirement, "uml_class": uml_class, "uml_sequence": "", "arch_design": arch_design, 
-                                    "repo_name": repo_name, "code_file_DAG": code_file_DAG, "repo_dir": f'../{dataset}_outputs/{model}/{repo_name}', "dataset": dataset},
-                                    config={"recursion_limit": 50})
+        initial_state = {
+            "arch_steps": 0,
+            "skeleton_steps": 0,
+            "code_steps": 0,
+            "dataset": dataset,
+            "repo_name": repo_name, 
+            "repo_dir": f'../outputs/{dataset}_outputs/{output_dir}/{repo_name}',
+            "prd": requirement, 
+            "uml_class": uml_class, 
+            "uml_sequence": "", 
+            "arch_design": arch_design, 
+            "code_file_DAG": code_file_DAG, 
+        }
+
+        set_global_state(initial_state)
+
+        final_state = app.invoke(initial_state)
 
         

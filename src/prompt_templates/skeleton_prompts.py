@@ -1,5 +1,5 @@
-from langchain.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 class SkeletonPrompts:
     SYSTEM = """You are an expert software project code generator.
@@ -20,10 +20,17 @@ Each element contains `name` and `description` fields. `name` represents the ide
 File elements include a `path` field indicating the file's actual relative path from the project root.
 Function and Method elements include a `parameters` field listing parameter specifications, which consist of `name`, `type`, and `description` (including default value info if specified in documentation).
 
+IMPORTANT CONTEXT RULES:
+- You are NOT provided with the full project context upfront.
+- You may need information about other files (their SSAT or skeleton) to ensure consistency.
+- You MUST actively retrieve such information using the provided tools when needed.
+- Do NOT assume missing information. If consistency with another file is required, query it explicitly via tools.
+- You MAY first call `flatten_ssat_symbols` to get a project-wide overview of files and symbols. If details of a specific file are required, use `find_ssat_of_file_by_path` for its SSAT structure, and `find_skeleton_of_file_by_path` for its generated skeleton.
+
 Follow JSON schema strictly. Avoid hallucinations.
 """
 
-    INIT = """Please generate the initial skeleton code for a file according to the following instructions and inputs.
+    INIT = """Please generate the initial skeleton code for the file at {path} according to the following instructions and inputs.
 
 ## Generation Instructions:
 
@@ -35,65 +42,91 @@ Follow JSON schema strictly. Avoid hallucinations.
   - If `"default"` is missing, leave the parameter without a default.
 - Add the function description as a comment immediately under each function signature.
 - The imports and definitions should remain consistent with the provided previously generated skeletons.
+- No complete project context is provided directly. If imports, references, base classes, or consistency with other files are required, use the available tools to retrieve the SSAT or skeleton of the corresponding files by path.
 
 ## Inputs:
 
-<Previously_Generated_Skeletons>
-```json
-{context}
-```
-</Previously_Generated_Skeletons>
-
 <Target_File_SSAT>
-```json
-{file_item}
-```
+{file_ssat}
 </Target_File_SSAT>
 """
 
-# TODO: refine the ITER prompt, add instructions?
-    ITER = """Please refine and improve the skeleton code of a file (shown in <Previous_Skeleton>) based on the feedback (shown in <Feedback_from_Judge>).
+    ITER = """Please refine and improve the skeleton code of a file (shown in <Target_File_Previous_Skeleton>) based on the suggestion (shown in <Suggestion>) and its SSAT (shown in <Target_File_SSAT>).
+
+Specifically, {action} the file at {path} because the following rationale: {rationale}.
 
 ## Inputs:
 
-<Previous_Skeleton>
-```json
-{file_item}
-```
-</Previous_Skeleton>
+<Target_File_Previous_Skeleton>
+{previous_file_skeleton}
+</Target_File_Previous_Skeleton>
 
-<Feedback_from_Judge>
-{feedback}
-</Feedback_from_Judge>
+<Suggestion>
+{suggestion}
+</Suggestion>
 
 <Target_File_SSAT>
-```json
-{file_item}
-```
+{file_ssat}
 </Target_File_SSAT>
 
-<Previously_Generated_Skeletons>
-```json
-{context}
-```
-</Previously_Generated_Skeletons>
-
 """
-
     @staticmethod
-    def init_prompt():
+    def get_system_prompt():
+        return SkeletonPrompts.SYSTEM
+    
+    @staticmethod
+    def get_init_human_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", SkeletonPrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", SkeletonPrompts.INIT)
         ])
     
     @staticmethod
-    def iter_prompt():
+    def get_iter_human_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", SkeletonPrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", SkeletonPrompts.ITER)
+        ])
+        
+        
+class GetSkeletonFilesToUpdatePrompts:
+    SYSTEM = """You are an expert software project code generator.
+
+Your task is to determine which skeleton files need to be modified, and how they should be modified, based on judge feedback and the current SSAT and skeleton state.
+
+You may use tools to retrieve additional structural information when needed.
+
+Follow JSON schema strictly. Avoid hallucinations.
+"""
+
+    HUMAN = """Please analyze the suggested changes of the feedback from judge, and determine how to update the project skeleton accordingly.
+
+## Instructions:
+
+- Analyze the suggested changes carefully.
+- Determine which skeleton files need to be modified, created, or removed.
+- If additional structural details are required, use tools to retrieve the SSAT or skeleton of specific files. Do NOT assume missing structure without verification via tools.
+
+## Output Requirements:
+
+- Output a list of files to update.
+- For each file, provide:
+  - `path`: file path
+  - `action`: one of [modify, create, remove]
+  - `rationale`: concise explanation of why this file needs to be updated
+  - `suggestion`: a brief description of what should be changed in this file
+
+## Inputs:
+
+<Suggested_Changes>
+{suggested_changes}
+</Suggested_Changes>
+
+"""
+    @staticmethod
+    def get_system_prompt():
+        return GetSkeletonFilesToUpdatePrompts.SYSTEM
+    
+    @staticmethod
+    def get_human_prompt():
+        return ChatPromptTemplate.from_messages([
+            ("human", GetSkeletonFilesToUpdatePrompts.HUMAN)
         ])

@@ -1,5 +1,5 @@
-from langchain.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 class CodePrompts:
     SYSTEM = """You are an expert software project code generator.
@@ -16,116 +16,110 @@ Follow JSON schema strictly. Avoid hallucinations.
 
 - Strict adherence to skeleton: Do not add new functions, classes, or methods that are not present in the skeleton. Do not remove or rename any existing functions, classes, or methods. Preserve the order and structure exactly as given.  
 - Function implementation: Replace `pass` with the correct implementation according to the function name, parameters, and descriptions provided in the skeleton. Keep the function-level doc/comment (description) directly under the function signature.  
-- Consistency with context: Ensure the generated code is consistent with already generated files (imports, function calls, shared classes, naming conventions, etc.). Use the <Previously_Generated_Files> only for reference, but do not modify them.  
+- Consistency with context: Ensure the generated code is consistent with already generated files (imports, function calls, shared classes, naming conventions, etc.). Use the <Context> only for reference, but do not modify them.  
 - Output format: The `code` must be syntactically valid Python code and compilable. Output only the complete code for the current file. Do not include any explanatory text outside of code.  
 
 ## Inputs:
 
 <Target_File_Skeleton>
-```json
 {file_item}
-```
 </Target_File_Skeleton>
 
-<Previously_Generated_Files>
-```json
+<Context>
 {context}
-```
-</Previously_Generated_Files>
+</Context>
 
 """
+    FIX = """The following functions are still placeholder implementations (e.g., pass or raise NotImplementedError) and must be fully implemented:
+{funcs}
 
-    ITER = """Please refine and improve the complete implementation code of a file (shown in <Target_File_to_be_Modified>) based on the feedback (shown in <Test_Feedback_Suggestions>).
+Please update the code by ONLY implementing these functions.
+Do NOT change any other function signatures, imports, or existing implementations.
+Return the full updated file code.
+"""
 
-You will be given the following inputs:
+    ITER = """Please refine and improve the complete implementation code of a file (shown in <Target_File_to_be_Modified>) based on the suggestion (shown in <Suggestion>) and contents of some code files associated with the target file (shown in <Context>).
 
-- <Target_File_to_be_Modified>: Provided as JSON with `"path"` and `"code"` fields.
-- <Test_Feedback_Suggestions>: Natural language feedback summarizing the errors and proposed fixes, which should guide the modifications.
-- <Context_Files>: A list of other already generated project files, each given as JSON with `"path"` and `"code"` fields. These should be considered for consistency, but do not modify them.
-- <History>: A list of previous interactions, including the initial prompt and any feedback from the judge.
+Specifically, modify the file at {path} because the following rationale: {rationale}.
 
 ## Instructions:
 
 - Modify only the <Target_File_to_be_Modified>.
-- Implement changes strictly based on the <Test_Feedback_Suggestions>.
-- Ensure consistency with the <Context_Files> (e.g., function signatures, imports, class relationships).
+- Implement changes strictly based on the <Suggestion>.
+- Ensure consistency with the <Context> (e.g., function signatures, imports, class relationships).
 - Do not introduce unrelated changes or new functions unless explicitly required by the feedback.
-- Maintain Python best practices and correctness.
-
 
 ## Inputs:
 
 <Target_File_to_be_Modified>
-```json
-{file_item}
-```
+{code}
 </Target_File_to_be_Modified>
 
-<Test_Feedback_Suggestions>
-{feedback}
-</Test_Feedback_Suggestions>
+<Suggestion>
+{suggestion}
+</Suggestion>
 
-<Context_Files>
-```json
+<Context>
 {context}
-```
-</Context_Files>
-
-<History>
-{history_str}
-</History>
+</Context>
     
 """
-
+    
     @staticmethod
-    def init_prompt():
+    def get_system_prompt():
+        return CodePrompts.SYSTEM
+    
+    @staticmethod
+    def get_init_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", CodePrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", CodePrompts.INIT)
         ])
     
     @staticmethod
-    def iter_prompt():
+    def get_iter_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", CodePrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", CodePrompts.ITER)
+        ])
+    
+    @staticmethod
+    def get_fix_prompt():
+        return ChatPromptTemplate.from_messages([
+            ("human", CodePrompts.FIX)
         ])
     
 
 class GetFilesToUpdatePrompts:
-    SYSTEM = """You are an expert software project code generator.
-    
-Your task is to identify which files need to be modified based on the provided feedback and the current project code.
+    SYSTEM = """You are an expert software engineer responsible for planning code modifications in a multi-file software project.
 
-Follow JSON schema strictly. Avoid hallucinations.
+Your task is to analyze feedback and decide which files should be updated, created, or removed, and in what order.
+You do NOT need to modify code directly. You only need to produce a structured modification plan.
+
+You have access to tools that can retrieve the content of any file by its path if needed. Use them ONLY when necessary.
+
+Follow the output JSON schema strictly. Avoid hallucinations.
 """
 
-    HUMAN = """Please analyze the provided code modification suggestions and determine which files in the current project code need to be modified to address the issues.
+    HUMAN = """Please analyze the feedback and determine which files in the project should be updated.
     
 You will be given the following inputs:
 
-- <Current_Project_Code>: Each file is represented as an object with `"path"` and `"code"` fields.
-- <Fix_Suggestions>: Natural language suggestions detailing the issues and proposed fixes.
+- <Project_Files>: A list of all existing files in the project. Each file includes: path (the file path) and description (a short description of the file's responsibility or contents).
+- <Fix_Suggestions>: Natural language feedback describing issues, missing functionality, incorrect behavior, or required changes.
 
 
 ## Instructions:
 
 - Analyze the suggestions in the context of the current code.
-- Identify which files must be modified to address the issues. This includes files directly mentioned in the suggestions or the error logs and files that contain relevant functions, classes, or imports that need to be updated.
-- Only output the list of file paths that should be modified.
+- Identify ALL files that need to be involved in the update. This includes files directly mentioned in the suggestions or the error logs and files that contain relevant functions, classes, or imports that need to be updated.
+- Only output the list of file paths that should be modified. Decide the appropriate action for each file (modify, create, or remove) and order the files in a reasonable modification sequence.
+- You may request the full content of any file by calling the provided tools if the description and feedback are insufficient.
 
 
 ## Inputs:
 
-<Current_Project_Code>
-```json
+<Project_Files>
 {context}
-```
-</Current_Project_Code>
+</Project_Files>
 
 <Fix_Suggestions>
 {feedback}
@@ -134,9 +128,11 @@ You will be given the following inputs:
 """
 
     @staticmethod
-    def get_prompt():
+    def get_system_prompt():
+        return GetFilesToUpdatePrompts.SYSTEM
+    
+    @staticmethod
+    def get_human_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", GetFilesToUpdatePrompts.SYSTEM),
-            # MessagesPlaceholder("history"),
             ("human", GetFilesToUpdatePrompts.HUMAN)
         ])

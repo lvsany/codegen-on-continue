@@ -1,54 +1,126 @@
-from langchain.chains.llm import LLMChain
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda
-from prompts import *
-from logger import get_logger
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ProviderStrategy
+from langchain.tools import tool
+from utils.logger import get_logger
 import os
 import json
 import subprocess
 from agents.test import Test
-from utils import *
+from utils.general_utils import *
 from json_repair import repair_json
-from generation_schema import CODE_JUDGE_SCHEMA, EXPERIENCE_JSON_SCHEMA
-from prompt_templates.code_judge_prompts import CodeJudgePrompts
+from typing import Tuple, Dict, Any, Optional, List, Literal
+from pydantic import BaseModel, Field
+from utils.generation_schema import CODE_JUDGE_SCHEMA, EXPERIENCE_JSON_SCHEMA
+from utils.global_state import update_global_state, get_global_state, get_state_value
+from prompt_templates.code_judge_prompts import CodeJudgePrompts, ExperiencePrompts
 from callbacks.agent_metrics_handler import AgentMetricsHandler
-from memory_manager.code_shared_memory import update_step, SharedStepRecord, load_step, append_experience, Experience
+from memory_manager.code_shared_memory import update_code_step, SharedStepCodeRecord, load_code_step, append_experience, Experience, load_best_generated_code
 from datetime import datetime
 
+class CodeFeedbackItem(BaseModel):
+    summary: str = Field(description="A clear and concise summary of the issue found in the code.")
+    likely_cause: str = Field(description="The most likely root cause of the issue found in the code.")
+    suggested_fix: str = Field(description="The actionable modification suggestions to fix the issue.")
+
+class CodeJudgeSchema(BaseModel):
+    feedback: List[CodeFeedbackItem] = Field(description="A list of feedback items for the code evaluation.")
+
+class Experience(BaseModel):
+    kind: Literal["success", "failure"] = Field(description="The kind of experience.")
+    scenario: str = Field(description="A short description of the error or success scenario.")
+    experience: str = Field(description="The summarized coding experience.")
+
+class ExperienceSummarySchema(BaseModel):
+    experiences: List[Experience] = Field(description="A list of summarized coding experiences extracted from the interaction.")
+
+@tool(description="Return the code of the given path.")
+def find_code_of_file_by_path(path: str) -> dict:
+    """Return the code of the given path."""
+    code = get_state_value("code_by_path")
+    if path in code.keys():
+        return code[path]
+    return None
+
+def search_in_text(text: str, query: str) -> List[str]:
+    """Return full sentences containing the query."""
+    
+    if not text or not query:
+        return []
+
+    SENTENCE_SPLIT_REGEX = re.compile(r'(?<=[。！？.!?])\s+|\n+')
+    sentences = SENTENCE_SPLIT_REGEX.split(text)
+    results = []
+
+    for sent in sentences:
+        if re.search(re.escape(query), sent, flags=re.IGNORECASE):
+            cleaned = sent.strip()
+            if cleaned:
+                results.append(cleaned)
+
+    return results
+
+
+@tool(description="Search relevant sections in PRD, UML, and Architecture Design documents by keyword.")
+def search_docs_by_keyword(query: str, top_k: int = 5) -> str:
+    """Search relevant sections in PRD, UML, and Architecture Design documents by keyword."""
+    
+    sources = {
+        "PRD": get_state_value("prd"),
+        "UML_Class": get_state_value("uml_class"),
+        "UML_Sequence": get_state_value("uml_sequence"),
+        "Arch_Design": get_state_value("arch_design"),
+    }
+    results = []
+
+    for source_name, text in sources.items():
+        if not text:
+            continue
+        matches = search_in_text(text, query)
+        for m in matches:
+            results.append({
+                "source": source_name,
+                "content": m.strip()
+            })
+    return {
+        "query": query,
+        "results": results[:top_k]
+    }
 
 class CodeJudgeAgent:
     MAX_CODE_ITER = 5
-    TEST_BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'datasets') + os.sep
+    TEST_BASE_DIR = "../datasets/"
 
-    def __init__(self, llm, secondery_llm):
-        self.base_llm = llm
-        self.model = llm.with_structured_output(CODE_JUDGE_SCHEMA, method="json_schema")
+    def __init__(self, llm):
+        self.model = llm
         self.logger = get_logger()
         self.metrics_handler = AgentMetricsHandler()
-        self.secondery_llm = secondery_llm.with_structured_output(EXPERIENCE_JSON_SCHEMA, method="json_schema")
+        self.code_json_dir_suffix = "/tmp_files"
 
-    def get_session_id(self, repo_name: str) -> str:
-        return f"code_judge_agent_{repo_name}"
+        self.tools = [search_docs_by_keyword, find_code_of_file_by_path]
 
-    def get_session_history(self, session_id: str) -> ChatMessageHistory:
-        return ChatMessageHistory()
+        self.agent_chain_with_tools = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=CodeJudgePrompts.get_system_prompt(),
+            response_format=ProviderStrategy(CodeJudgeSchema)
+        ).with_config(callbacks=[self.metrics_handler])
 
-    def write_code_to_files(self, latest_code: any, repo_dir: str) -> tuple[bool, list]:
-        written_files = []
-        if isinstance(latest_code, str):
-            try:
-                code_data = json.loads(latest_code)
-            except Exception as e:
-                self.logger.error(f"Code JSON parsing failed: {e}")
-                return False, []
-        else:
-            code_data = latest_code
+        self.agent_chain_with_tools_for_experiences = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=ExperiencePrompts.get_system_prompt(),
+            response_format=ProviderStrategy(ExperienceSummarySchema)
+        ).with_config(callbacks=[self.metrics_handler])
+
+    def write_code_to_files(self, code_data: any, repo_dir: str) -> tuple[bool, list]:
+        written_files, error_files = [], []
 
         for item in code_data:
             file_path = os.path.join(repo_dir, item["path"])
@@ -56,28 +128,29 @@ class CodeJudgeAgent:
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(item["code"])
+                    self.logger.info(f"write {file_path}")
                 written_files.append(file_path)
             except Exception as e:
-                self.logger.error(f"Error writing file {file_path}: {e}")
+                self.logger.error(f"[Code Judge Agent] Error writing file {file_path}: {e}")
+                error_files.append(file_path)
 
-        return True, written_files
+        return written_files, error_files
 
     def remove_written_files(self, written_files: list) -> None:
         for f in written_files:
             try:
                 os.remove(f)
-                self.logger.debug(f"Removed temporary file: {f}")
+                self.logger.info(f"[Code Judge Agent]: Successfully remove file {f}")
             except Exception as e:
-                self.logger.warning(f"Failed to remove file {f}: {e}")
+                self.logger.warning(f"[Code Judge Agent] Failed to remove file {f}: {e}")
 
     def run_pytest_and_collect(self, dataset: str, repo_name: str, repo_dir: str) -> tuple[str, int, int]:
         test_dir = f"{self.TEST_BASE_DIR}{dataset}/{repo_name}"
         t = Test(test_dir, repo_dir, logger=self.logger)
-        # TODO: 改成相对路径有bug？
         test_output, error, passed, total = t.test(repo_dir, "python")
         return test_output, error, passed, total
 
-    def generate_test_feedback(self, test_output: str, error: bool, passed: int, total: int, result: dict = None) -> str:
+    def generate_test_feedback(self, error: bool, passed: int, total: int, result: list = None) -> str:
         if passed == total and total > 0:
             return "All unit tests passed.\n"
         else:
@@ -86,205 +159,114 @@ class CodeJudgeAgent:
             else:
                 feedback = f"Code failed the unit tests. Only pass {passed} out of {total} test cases.\n"
             if result:
-                feedback += "\nHere are some suggestions:\n\n"
-                feedback += json.dumps(result, indent=2, ensure_ascii=False)
+                suggestion_text = "\nHere are some suggestions:\n\n"
+                for item in result:
+                    for k, v in item.items():
+                        suggestion_text += f"{k}: {v}\n"
+                        if k == 'suggested_fix':
+                            suggestion_text += '\n'
+                feedback += suggestion_text
             return feedback
 
-    def run_code_judge_chain(self, test_output: str, session_id: str, steps: int) -> dict:
-        prompt = CodeJudgePrompts.get_prompt()
-        input_key = "error_log"
-        input_data = {
-            "error_log": test_output
-        }
-
-        judge_code_chain = RunnableWithMessageHistory(
-            prompt | self.model,
-            get_session_history=self.get_session_history,
-            input_messages_key=input_key,
-            history_messages_key="history",
+    def run_code_judge_agent(self, test_output: str) -> dict:
+        
+        result = invoke_with_retry(
+            self.agent_chain_with_tools,
+            {
+                "messages": CodeJudgePrompts.get_human_prompt().format_messages(
+                    error_log=test_output
+                )
+            }
         )
 
-        try:
-            result = judge_code_chain.invoke(
-                input_data,
-                config={
-                    "configurable": {"session_id": session_id, "agent": "code_judge_agent", "step": steps},
-                    "callbacks": [self.metrics_handler]
-                }
-            )
-            return result
-        except Exception as e:
-            self.logger.error(f"[Code Judge Agent] Error in step {steps}: {e}")
-            raise e  # 抛出异常供上层处理
+        suggestions: CodeJudgeSchema = result["structured_response"]
+        return suggestions.model_dump()["feedback"]
 
-    def make_judge_decision(self, passed: int, total: int, steps: int, written_files: List) -> tuple[bool, str]:
+    def make_judge_decision(self, passed: int, total: int, steps: int, written_files: List) -> Dict:
         if passed == total and total > 0:
-            return True, ""
+            return {"decision": "approve", "forced": False}
         
         if steps >= self.MAX_CODE_ITER:
-            return True, "Maximum CODE iterations reached, forcing approval.\n"
+            return {"decision": "approve", "forced": True}
         
         self.remove_written_files(written_files)
         
-        return False, ""
-    
-    # 得到上轮代码测试的结果
-    def get_previous_test_result(self, repo_name: str, steps: int) -> tuple[int, int]:
+        return {"decision": "reject", "forced": False}
+
+    def update_experience(self, repo_name: str, steps: int, passed: int, result: dict, repo_dir: str) -> None:
+        
         shared_session_id = f"code_shared_{repo_name}"
-        load = None
-        if steps > 1:
-            try:
-                load = load_step(shared_session_id, step=steps)
-            except Exception:
-                load = None
+        prev = load_code_step(shared_session_id, step=steps - 1)
+        curr = load_code_step(shared_session_id, step=steps)
 
-        if load is not None:
-            if getattr(load, "test_result", None):
-                tr = load.test_result
-                if tr.get("error") is False:
-                    prev_passed = tr.get("passed")
-                else:
-                    prev_passed = -1
-            else:
-                prev_passed = -1
-        return prev_passed
+        prev_fb_obj = getattr(prev, "feedbacks", None)
+        self.logger.info("get prev_fb_obj")
+        prev_feedback_text = prev_fb_obj["text"] or ""
+        self.logger.info("get prev_feedback_text")
+        curr_fb_obj = getattr(curr, "feedbacks", None)
+        curr_feedback_text = curr_fb_obj["text"] or ""
 
-    # # 判断新的代码是否比上轮代码的测试结果好，如果是则继续流程，否则将代码回退至上次的版本 并总结经验存入记忆 并告诉llm不能这样修改
-    # # 这里只处理不能通过所有check test的分支，只处理steps>1的情况
-    # # 返回值：是否需要回退（同时在本步完成经验的更新）
-    # def check_code_improvement(self, repo_name: str, passed: int, total: int, steps: int, written_files: List) -> tuple[bool, str]:
-    #     prev_passed = self.get_previous_test_result(repo_name, steps)
-    #     # 比较这次和上次通过的结果
-    #     if passed > prev_passed:
-    #         # 总结这次修改的经验
-    #         self.update_experience()
-    #     elif passed == prev_passed:
-    #         # TODO: 看这次的报错是否和上次一样，如果不一样总结成功的那部分经验，如果一样总结为什么这样修改不对
-    #         pass
-    #     else:
-    #         # 总结改不对的经验，同时回退到上一个版本
-    #         self.update_experience()
-    #         self.code_undo()
-    #         pass
+        diffs = getattr(curr, "diff_code", []) if curr else []
 
-    # def check_code_improvement(self, repo_name: str, passed: int, total: int, steps: int, written_files: List) -> tuple[bool, str]:
-    #     prev_passed = self.get_previous_test_result(repo_name, steps)
-    #     # 比较这次和上次通过的结果
-    #     if passed > prev_passed:
-    #         return True, "improved"
-    #     elif passed == prev_passed:
-    #         return False, "same"
-    #     else:
-    #         return False, "worse"
+        diffs_text = ''
+        for item in diffs:
+            for k, v in item.items():
+                diffs_text += f"{k}: {v}\n"
+                if k == 'diff':
+                    diffs_text += '\n'
 
-    # # code回退到上一个版本
-    # def code_undo():
-    #     pass
+        prev_passed = getattr(prev, "test_result", None).get("passed") or 0
+        curr_passed = passed
 
-    # 更新经验池，包括成功的和失败的
-    def update_experience(self, repo_name: str, steps: int, passed: int, total: int, test_output: str, result: dict, repo_dir: str) -> None:
-        """Call secondary LLM to summarize experience and persist to shared memory (step-level and repo-level).
-
-        The generated experience should be a JSON-like dict matching Experience dataclass.
-        """
-        self.logger.info(f"[Code Judge Agent] Summarizing experience for step {steps}... (in)")
-        try:
-            shared_session_id = f"code_shared_{repo_name}"
-            prev = load_step(shared_session_id, step=steps - 1)
-            curr = load_step(shared_session_id, step=steps)
-
-            # safely extract feedback text (feedbacks may be missing or not a dict)
-            prev_fb_obj = getattr(prev, "feedbacks", None)
-            if isinstance(prev_fb_obj, dict):
-                prev_feedbacks = prev_fb_obj.get("text", "")
-            else:
-                prev_feedbacks = ""
-
-            curr_fb_obj = getattr(curr, "feedbacks", None)
-            if isinstance(curr_fb_obj, dict):
-                curr_feedbacks = curr_fb_obj.get("text", "")
-            else:
-                curr_feedbacks = ""
-
-            curr_code = getattr(curr, "generated_code", []) if curr else []
-            
-            # extract only files with non-empty diffs
-            def extract_diffs(code_list):
-                diffs = []
-                for item in (code_list or []):
-                    try:
-                        d = item.get("diff") if isinstance(item, dict) else None
-                    except Exception:
-                        d = None
-                    if d:
-                        diffs.append({"path": item.get("path"), "diff": d})
-                return diffs
-
-            diffs = extract_diffs(curr_code)
-
-            prev_passed = self.get_previous_test_result(repo_name, steps)
-            curr_passed = passed
-
-            prompt = CodeJudgePrompts.get_experience_prompt()
-            input_data = {
-                "prev_passed": prev_passed,
-                "prev_feedback": prev_feedbacks,
-                "curr_passed": curr_passed,
-                "curr_feedback": curr_feedbacks,
-                "diffs": diffs
+        self.logger.info("start agent_chain_with_tools_for_experiences")
+        result = invoke_with_retry(
+            self.agent_chain_with_tools_for_experiences,
+            {
+                "messages": ExperiencePrompts.get_human_prompt().format_messages(
+                    prev_passed=prev_passed,
+                    prev_feedback=prev_feedback_text,
+                    curr_passed=curr_passed,
+                    curr_feedback=curr_feedback_text,
+                    diffs=diffs_text
+                )
             }
-            input_key = "diffs"
+        )
+        self.logger.info("end agent_chain_with_tools_for_experiences")
+        experiences : ExperienceSummarySchema = result["structured_response"]
+        experiences_list = experiences.model_dump()["experiences"]
 
-            summary_chain = RunnableWithMessageHistory(
-                prompt | self.secondery_llm,
-                get_session_history=self.get_session_history,
-                input_messages_key=input_key,
-                history_messages_key="history",
-            )
+        add_experienve_count = 0
+        for exp_entry in experiences_list:
+            # persist as Experience dataclass via append_experience
+            exp_entry["step"] = steps
+            try:
+                append_experience(shared_session_id, steps, exp_entry, repo_dir=repo_dir)
+                add_experienve_count += 1
+            except Exception:
+                pass
+        self.logger.info(f"[Code Judge Agent] Generated {len(experiences_list)} experiences. Added {add_experienve_count} experiences for step {steps}.")
+        
+        return
+    
+    def save_best_generated_code_to_jsonl(self, repo_dir: str, full_code: list) -> None:
+        code_jsonl_dir = f"{repo_dir}{self.code_json_dir_suffix}"
+        os.makedirs(code_jsonl_dir, exist_ok=True)
+        code_jsonl_path = f"{code_jsonl_dir}/best_generated_code.jsonl"
 
-            # invoke the secondary LLM to summarize experiences
-            result = summary_chain.invoke(
-                input_data,
-                config={"configurable": {"session_id": self.get_session_id(repo_name), "agent": "code_judge_agent", "step": steps}, "callbacks": [self.metrics_handler]}
-            )
-            experiences_list = result.get("experiences", [])
-            # defensive checks and logging for debugging
-            if experiences_list is None:
-                self.logger.warning(f"[Code Judge Agent] summary_chain returned None for step {steps}")
-                experiences_list = []
-            else:
-                self.logger.debug(f"[Code Judge Agent] summary_chain returned type {type(experiences_list)} with len={len(experiences_list) if hasattr(experiences_list, '__len__') else 'unknown'}")
-
-            add_experienve_count = 0
-            for exp_entry in experiences_list:
-                # persist as Experience dataclass via append_experience
-                try:
-                    exp_obj = Experience(kind=exp_entry.get("kind", "failure"), scenario=exp_entry.get("scenario", ""), experience=exp_entry.get("experience", {}), step=steps)
-                    append_experience(shared_session_id, steps, exp_obj, repo_dir=repo_dir)
-                    add_experienve_count += 1
-                except Exception:
-                    # fallback: write raw dict into step experiences
-                    try:
-                        update_step(shared_session_id, steps, {"experiences": [exp_entry]}, repo_dir=repo_dir)
-                        add_experienve_count += 1
-                    except Exception:
-                        pass
-            self.logger.info(f"[Code Judge Agent] Generated {len(experiences_list)} experiences. Added {add_experienve_count} experiences for step {steps}.")
-        except Exception as e:
-            self.logger.exception(f"[Code Judge Agent] Failed to summarize/persist experiences for step {steps}: {e}")
-            # propagate or return early to avoid silent failures
-            return
+        with open(code_jsonl_path, "w", encoding="utf-8") as f:
+            for item in full_code:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        self.logger.info(f"[Code Agent] Best generated code saved to {code_jsonl_path}")
 
     def load_current_step_code(self, repo_name: str, steps: int) -> tuple[list, str, str]:
         # load previous step data from shared memory
         shared_session_id = f"code_shared_{repo_name}"
         load = None
         generated_code = []
-        if steps > 1:
-            try:
-                load = load_step(shared_session_id, step=steps)
-            except Exception:
-                load = None
+        try:
+            load = load_code_step(shared_session_id, step=steps)
+        except Exception:
+            load = None
 
         if load is not None:
             if getattr(load, "generated_code", []):
@@ -297,36 +279,30 @@ class CodeJudgeAgent:
         dataset = state["dataset"]
         repo_name = state["repo_name"]
         repo_dir = state["repo_dir"]
-        # latest_code = state["latest_code"]
         steps = state["code_steps"]
-        # test_status = state.get("test_status", {})
-        session_id = self.get_session_id(repo_name)
 
         self.logger.info(f"==========CODE CHECK IN STEP {steps}===========")
 
         latest_code = self.load_current_step_code(repo_name, steps)
 
-        write_ok, written_files = self.write_code_to_files(latest_code, repo_dir)
-        feedback = ""
-        if not write_ok:
-            feedback = "Code JSON parsing failed."
-            self.logger.info(f"[decision]: False")
-            self.logger.info(f"[feedback]: {feedback}")
-            self.remove_written_files(written_files)
-            
-            code_decision = False
-            test_output = ""
-            passed, total = 0, 0
-            error = True
-            test_status = "test cases fail to run as expected because of Code JSON parsing failure"
+        suggested_changes = [] 
+        written_files, files_fail_to_write = self.write_code_to_files(latest_code, repo_dir)
+        for item in files_fail_to_write:
+            suggested_changes.append({
+                "summary": f"Failed to write {item}.",
+                "likely_cause": "File permissions or path validity.",
+                "suggested_fix": "Please check file permissions or path validity.",
+                })
 
+        feedback_text = ""
+        if files_fail_to_write:
+            feedback_text = f"Code JSON parsing failed in the following files: {' '.join(files_fail_to_write)}."
+
+        test_output, error, passed, total = self.run_pytest_and_collect(dataset, repo_name, repo_dir)
+        if error:
+            test_status = "test cases fail to run as expected because of errors"
         else:
-            test_output, error, passed, total = self.run_pytest_and_collect(dataset, repo_name, repo_dir)
-            if error:
-                test_status = "test cases fail to run as expected because of errors"
-            else:
-                test_status = f"passed {passed} out of {total}"
-            code_decision, force_feedback = self.make_judge_decision(passed, total, steps, written_files)
+            test_status = f"passed {passed} out of {total}"
 
         # write test result into shared step record
         try:
@@ -338,63 +314,54 @@ class CodeJudgeAgent:
                 "output": test_output,
                 "test_status" : test_status
             }
-            update_step(shared_session_id, steps, {"test_result": test_result}, repo_dir=repo_dir)
+            update_code_step(shared_session_id, steps, {"test_result": test_result}, repo_dir=repo_dir)
         except Exception:
             pass
 
-        
-        if code_decision and force_feedback == "":
-            feedback = self.generate_test_feedback(test_output, error, passed, total)
+        code_decision = self.make_judge_decision(passed, total, steps, written_files)
+        if code_decision['decision'] == "approve":
+            feedback_text += self.generate_test_feedback(error, passed, total)
             result = None
-        elif code_decision is False and feedback == "Code JSON parsing failed.":
-            result = None
-        else:
-            try:
-                result = self.run_code_judge_chain(test_output, session_id, steps)
-                feedback = self.generate_test_feedback(test_output, error, passed, total, result)
-                feedback = force_feedback + feedback
-            except Exception as e:
-                # TODO: 错误处理
-                self.logger.error(f"[Code Judge Agent] Error in step {steps}: {e}")
-                feedback = "Code judge agent encountered an error."
-                code_decision = False
-                self.logger.info(f"[decision]: False")
-                self.logger.info(f"[feedback]: {feedback}")
-                result = None
+        elif code_decision['decision'] == "reject":
+            result = self.run_code_judge_agent(test_output)
+            suggested_changes.extend(result)
+            feedback_text = self.generate_test_feedback(error, passed, total, suggested_changes)
 
         # Persist structured feedback (including raw `result`) into shared memory
         try:
             shared_session_id = f"code_shared_{repo_name}"
-            fb = {
-                "result": result if result is not None else [],
-                "text": feedback
+            feedbacks = {
+                "result": suggested_changes if suggested_changes is not None else [],
+                "text": feedback_text
             }
-            update_step(shared_session_id, steps, {"feedbacks": fb}, repo_dir=repo_dir)
+            update_code_step(shared_session_id, steps, {"feedbacks": feedbacks}, repo_dir=repo_dir)
         except Exception:
+            self.logger.error(f"[Code Judge Agent] Error in updating shared step record at step {steps}: {e}")
             pass
 
-        # 调试信息：记录决策与步数以便排查为何未进入经验生成分支
-        self.logger.info(f"[Code Judge Agent] Decision debug: code_decision={code_decision}, steps={steps}, passed={passed}, total={total}, force_feedback={locals().get('force_feedback', None)}")
-
-        # 总结经验
-        # If failed and not first step, summarize experience via secondary LLM and persist
-        if code_decision is False and steps > 1:
+        # Experience
+        if code_decision['decision'] == "reject" and steps > 1:
             try:
                 self.logger.info(f"[Code Judge Agent] Summarizing experience for step {steps}...")
-                self.update_experience(repo_name, steps, passed, total, test_output, result, repo_dir)
-            except Exception:
+                self.update_experience(repo_name, steps, passed, result, repo_dir)
+            except Exception as e:
+                self.logger.error(f"[Code Judge Agent] Error in updating shared experiences at step {steps}: {e}")
                 pass
 
         self.logger.info(f"[decision]: {code_decision}")
-        self.logger.info(f"[feedback]: {feedback}")
+        self.logger.info(f"[feedback]: {feedback_text}")
+
+        if code_decision['decision'] == 'approve':
+            best_generated_code = load_best_generated_code(f"code_shared_{repo_name}")
+            self.save_best_generated_code_to_jsonl(repo_dir, best_generated_code)
+            self.write_code_to_files(best_generated_code, repo_dir)
+            self.logger.info(f"[Code Judge Agent]: write best generated code to {repo_dir}")
 
 
-        updated_state = {
+        return {
             **state,
-            "code_decision": code_decision,
-            "code_feedback": feedback,
+            "code_decision": code_decision["decision"],
+            "code_feedback": feedback_text,
             "test_status": test_status,
             "code_steps": steps,
-            "dataset": dataset
         }
-        return updated_state

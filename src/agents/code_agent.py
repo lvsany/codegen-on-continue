@@ -1,168 +1,305 @@
-from langchain.chains.llm import LLMChain
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableWithMessageHistory
-from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from prompts import *
-from logger import get_logger
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ProviderStrategy
+from utils.logger import get_logger
 import os
 import json
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Tuple, Literal
 import re
-from utils import *
+import ast
+from utils.general_utils import *
 from json_repair import repair_json
-from memory_manager.code_memory import get_session_history
-from extract_api import extract_api
+from utils.extract_api import extract_api
+from utils.global_state import update_global_state, get_global_state, get_state_value
 import difflib
-from build_dependency_graph import reorder_skeleton_by_topo
+from utils.build_dependency_graph import reorder_skeleton_by_topo
 from callbacks.agent_metrics_handler import AgentMetricsHandler
+from langchain.tools import tool
+from functools import partial
 from prompt_templates.code_prompts import CodePrompts, GetFilesToUpdatePrompts
-from generation_schema import CODE_FILE_UPDATE_SCHEMA, CODE_JSON_SCHEMA
-from memory_manager.code_shared_memory import SharedStepRecord, save_step, update_step, load_step
+from utils.generation_schema import CODE_FILE_UPDATE_SCHEMA, CODE_JSON_SCHEMA
+from memory_manager.code_shared_memory import SharedStepCodeRecord, save_code_step, update_code_step, load_code_step
 from memory_manager.code_shared_memory import load_repo_experiences
+from memory_manager.arch_shared_memory import SharedStepArchRecord, load_arch_step, save_arch_step
+from memory_manager.skeleton_shared_memory import load_skeleton_step
 from rank_bm25 import BM25Okapi
+from pydantic import BaseModel, Field
+from utils.construct_soft_relation import build_context_for_init_code_generation, flatten_ssat_symbols, build_soft_relation_index
+from utils.construct_realized_relation import realize_ssat_relations, build_file_relation_graph, collect_related_file_codes, update_realized_relations_from_code, update_ssat_realized_from_code, remove_file_from_ssat
+from utils.general_utils import invoke_with_retry
 
+class CodeSchema(BaseModel):
+    path: str = Field(description="The file path of the code file")
+    code: str = Field(description="The complete code for the file")
+    description: str | None = Field(default=None,  description="The description of the code file")
+
+class CodeFileUpdateItem(BaseModel):
+    path: str = Field(description="The file path of the code file to be updated")
+    action: Literal["modify", "create", "remove"] = Field(description="Action to perform on the file")
+    rationale: str = Field(description="The rationale for updating the file")
+    suggestion: str = Field(description="Suggested modification for the file")
+
+class CodeFileUpdateSchema(BaseModel):
+    files_to_update: List[CodeFileUpdateItem] = Field(description="List of code files to be updated")
+
+@tool(description="Search for the corresponding 'file' node in SSAT based on the file path, and return all content of that node.")
+def find_ssat_of_file_by_path(path: str) -> dict:
+    """Search for the corresponding "file" node in SSAT based on the file path, and return all content of that node."""
+    ssat = get_state_value("ssat")
+    for module in ssat.get("modules", []):
+        for file in (module.get("files") or []):
+            if file.get("path") == path:
+                return file
+    return None
+
+@tool(description="Search for the current code of the file path, and return all content of that item.")
+def find_code_of_file_by_path(path: str) -> dict:
+    """Search for the current code of the file path, and return all content of that item."""
+    code_index = get_state_value("code_by_path")
+    if code_index and path in code_index.keys():
+        return code_index[path]["code"]
+    else:
+        return None
 
 class CodeAgent:
     CONTEXT_MAX_LENGTH = 5  
+    MAX_RETRIES_PER_FILE = 3  
 
     def __init__(self, llm):
-        self.base_llm = llm
-        self.model = self.base_llm.with_structured_output(CODE_JSON_SCHEMA, method="json_schema")
-        self.clean_history_runnable = RunnableLambda(clean_history)
+        self.model = llm
         self.logger = get_logger()
         self.metrics_handler = AgentMetricsHandler()
         self.code_json_dir_suffix = "/tmp_files"
 
-    def get_session_id(self, repo_name: str) -> str:
-        return f"code_agent_{repo_name}"
+        self.tools = [find_ssat_of_file_by_path, find_code_of_file_by_path]
 
-    def save_file_output_to_jsonl(self, path: str, file_content: str, jsonl_path: str = "generated_files.jsonl") -> None:
-        if hasattr(file_content, "to_string"):
-            content = file_content.to_string()
-        elif hasattr(file_content, "content"):
-            content = file_content.content
-        else:
-            content = str(file_content)
-        
-        if "```" in content:
-            match = re.search(r"```(?:python)?\s*([\s\S]+?)\s*```", content)
-            if match:
-                content = match.group(1)
-        
-        record = {
-            "path": path,
-            "content": content.strip()
-        }
-        with open(jsonl_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.agent_chain_with_tools = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=CodePrompts.get_system_prompt(),
+            response_format=ProviderStrategy(CodeSchema)
+        ).with_config(callbacks=[self.metrics_handler])
 
-    def reorder_skeleton_by_topo(self, latest_skeleton: list) -> list:
+        self.agent_chain_with_tools_for_get_files_to_update = create_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=GetFilesToUpdatePrompts.get_system_prompt(),
+            response_format=ProviderStrategy(CodeFileUpdateSchema)
+        ).with_config(callbacks=[self.metrics_handler])
+
+    def reorder_skeleton(self, latest_skeleton: list) -> list:
         try:
             reordered_skeleton = reorder_skeleton_by_topo(latest_skeleton)
             self.logger.info(f"[Code Agent] Successfully reordered skeleton based on topological sort.")
             return reordered_skeleton
         except Exception as e:
-            self.logger.error(f"[Code Agent] Error in reordering skeleton by topo: {e}")
+            self.logger.warning(f"[Code Agent] Error in reordering skeleton by topo: {e}")
             return latest_skeleton
 
-    def build_code_context(self, full_code: list) -> list:
-        # TODO: 重新考虑上下文的获取方式
-        context = []
-        if len(full_code) > self.CONTEXT_MAX_LENGTH:
-            # 超过最大长度：早期文件提取API，最近5个保留完整代码
-            for item in full_code[:-self.CONTEXT_MAX_LENGTH]:
-                api_info = extract_api(item["code"], item["path"])
-                context.append({"path": item["path"], "code": api_info})
-            context.extend(full_code[-self.CONTEXT_MAX_LENGTH:])
-        else:
-            # 未超过最大长度：保留完整代码
-            context = full_code
-        return context
-
-    def generate_init_code(self, latest_skeleton: list, test_status: Dict, session_id: str, steps: int) -> list:
-        full_code = []
-        # 按拓扑顺序遍历文件生成代码
-        for file_item in latest_skeleton:
-            if file_item["path"].endswith(".py"):
-                self.logger.info(f"[Code Agent] Processing file: {file_item['path']}")
-                context = self.build_code_context(full_code)
-
-                prompt = CodePrompts.init_prompt()
-                input_key = "file_item"
-                input_data = {
-                    "file_item": file_item,
-                    "context": context
-                }
-                code_chain = RunnableWithMessageHistory(
-                    prompt | self.model,
-                    get_session_history=get_session_history,
-                    input_messages_key=input_key,
-                    history_messages_key="history"
-                )
-
-                try:
-                    result = code_chain.invoke(
-                        input_data,
-                        config={
-                            "configurable": {"session_id": session_id, "agent": "code_agent", "step": steps},
-                            "callbacks": [self.metrics_handler]
-                        }
-                    )
-                    file_item["code"] = result["code"]
-                    full_code.append({
-                        "path": result.get("path", file_item["path"]),
-                        "code": result["code"],
-                        "diff": ""
-                    })
-                except Exception as e:
-                    # TODO: 增加错误处理，无法正常生成时重新生成或者记录在一个list中，最后统一处理
-                    self.logger.error(f"[Code Agent] Error in step {steps} when generating code for file {file_item.get('path', '')}: {e}")
-                    file_item["code"] = ""
-                    full_code.append({"path": file_item["path"], "code": "", "diff": ""})
-
-        self.update_memory(session_id, latest_skeleton, None, None, test_status, steps, full_code, None)
-
-        return full_code
-
-    def get_files_to_update(self, feedback: str, latest_code: list, steps: int) -> set:
-        get_file_update_llm = self.base_llm.with_structured_output(CODE_FILE_UPDATE_SCHEMA, method="json_schema")
-        prompt = GetFilesToUpdatePrompts.get_prompt()
-        input_key = "feedback"
-        input_data = {
-            "feedback": feedback,
-            "context": latest_code
-        }
-        get_files_to_update_chain = RunnableWithMessageHistory(
-            prompt | get_file_update_llm,
-            get_session_history=get_session_history,
-            input_messages_key=input_key,
-            history_messages_key="history"
-        )
-
+    def find_unimplemented_functions(self, code: str) -> List[str]:
         try:
-            result = get_files_to_update_chain.invoke(
-                input_data,
-                config={
-                    "configurable": {"session_id": "none", "agent": "code_agent", "step": steps},
-                    "callbacks": [self.metrics_handler]
+            tree = ast.parse(code)
+        except SyntaxError:
+            return []
+
+        unimplemented = []
+
+        class PlaceholderFunctionVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.class_stack = []
+
+            def visit_ClassDef(self, node: ast.ClassDef):
+                self.class_stack.append(node.name)
+                self.generic_visit(node)
+                self.class_stack.pop()
+
+            def visit_FunctionDef(self, node: ast.FunctionDef):
+                if self._is_placeholder_body(node):
+                    unimplemented.append(self._qualified_name(node.name))
+                self.generic_visit(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+                if self._is_placeholder_body(node):
+                    unimplemented.append(self._qualified_name(node.name))
+                self.generic_visit(node)
+
+            def _qualified_name(self, func_name: str) -> str:
+                if self.class_stack:
+                    return f"{self.class_stack[-1]}.{func_name}"
+                return func_name
+
+            @staticmethod
+            def _is_placeholder_body(node) -> bool:
+                """
+                True iff function body is a known placeholder implementation.
+                """
+                if len(node.body) != 1:
+                    return False
+
+                stmt = node.body[0]
+
+                # case 1: pass
+                if isinstance(stmt, ast.Pass):
+                    return True
+
+                # case 2: raise NotImplementedError / UnimplementedError
+                if isinstance(stmt, ast.Raise):
+                    exc = stmt.exc
+                    if exc is None:
+                        return False
+
+                    if isinstance(exc, ast.Name):
+                        return _is_not_implemented_name(exc.id)
+
+                    if isinstance(exc, ast.Call):
+                        if isinstance(exc.func, ast.Name):
+                            return _is_not_implemented_name(exc.func.id)
+
+                return False
+
+        def _is_not_implemented_name(name: str) -> bool:
+            """
+            Match NotImplementedError / UnimplementedError and common variants.
+            """
+            lowered = name.lower()
+            return (
+                "notimplemented" in lowered
+                or "unimplemented" in lowered
+            )
+
+        PlaceholderFunctionVisitor().visit(tree)
+        return unimplemented
+
+    def generate_init_code(self, repo_name: str, latest_skeleton: list, steps: int) -> list:
+        ssat = load_arch_step(f"arch_shared_{repo_name}").ssat
+        full_code = []
+        
+        # preparation for context construction
+        symbol_index = flatten_ssat_symbols(ssat)
+        outgoing_index, incoming_index = build_soft_relation_index(ssat, latest_skeleton)
+        
+        for file_item in latest_skeleton:
+            if not file_item["path"].endswith(".py"):
+                continue
+            
+            self.logger.info(f"[Code Agent] Processing file: {file_item['path']}")
+            
+            _, context = build_context_for_init_code_generation(file_item["path"], ssat, latest_skeleton, symbol_index, outgoing_index, incoming_index)
+
+            result = invoke_with_retry(
+                self.agent_chain_with_tools,
+                {
+                    "messages": CodePrompts.get_init_prompt().format_messages(
+                        file_item=f"- {file_item['path']}\n\n{file_item['skeleton_code']}\n",
+                        context=context
+                    )
                 }
             )
-            return set(result["files_to_update"]) if result["files_to_update"] else set()
-        except Exception as e:
-            # TODO: 错误处理
-            self.logger.error(f"[Code Agent] Error in getting files to update at step {steps}: {e}")
-            return set()
-        
-    def generate_iter_code(self, latest_code: list, feedback: str, test_status: Dict, session_id: str, steps: int) -> tuple[list, list]:
-        # retrieve repo name from session_id (session_id format: code_agent_{repo_name})
-        repo_name = session_id[len("code_agent_"):] if session_id.startswith("code_agent_") else session_id
 
-        # retrieve top-k relevant experiences from repo-level experience store
+            code_file: CodeSchema = result["structured_response"]
+            code_file_dict = code_file.model_dump()
+
+            # if unimplemented
+            retries = 0
+            
+            while retries < self.MAX_RETRIES_PER_FILE:
+                # find if there exist any fucntions unimplemented (with pass)
+                unimplemented = self.find_unimplemented_functions(code_file_dict["code"])
+                    
+                if not unimplemented:
+                    file_item["code"] = code_file_dict["code"]
+                    full_code.append({
+                        "path": code_file_dict["path"],
+                        "code": code_file_dict["code"],
+                        "diff": ""
+                    })
+                    ssat = update_ssat_realized_from_code(ssat=ssat, file_result=code_file_dict)
+                    break
+
+                # fix the code
+                self.logger.warning(f"[Code Agent] Unimplemented functions in {file_item['path']}: {unimplemented}")
+                
+                messages = list(result["messages"])
+                messages.extend(
+                    CodePrompts.get_fix_prompt().format_messages(
+                        funcs="\n".join(f"- {f}" for f in unimplemented)
+                    )
+                )
+                result = invoke_with_retry(
+                    self.agent_chain_with_tools,
+                    {
+                        "messages": messages
+                    }
+                )
+
+                code_file: CodeSchema = result["structured_response"]
+                code_file_dict = code_file.model_dump()
+                
+                retries += 1
+                
+            else:
+                self.logger.error(f"[Code Agent] Error in step {steps} when generating code for file {file_item.get('path', '')} after {self.MAX_RETRIES_PER_FILE} retries")
+                file_item["code"] = code_file_dict["code"]
+                full_code.append({"path": code_file_dict["path"], "code": code_file_dict["code"], "diff": ""})
+                
+                ssat = update_ssat_realized_from_code(ssat=ssat, file_result=code_file_dict)
+
+        ssat = self._update_ssat_with_realized_relation(full_code)
+        code_by_path = {
+            item["path"]: item
+            for item in full_code
+        }
+        update_global_state({"ssat": ssat, "code_by_path": code_by_path})
+
+        return full_code
+    
+    def _update_ssat_with_realized_relation(self, full_code: List[dict]):
+        ssat = get_state_value("ssat")
+
+        # generate realized relations and update ssat (update file / func nodes with realized relations)
+        ssat = realize_ssat_relations(ssat, full_code)
+        
+        # construct outgoing / incoming index for each file
+        outgoing_index, incoming_index = build_file_relation_graph(ssat)
+        
+        ssat["realized_relations"] = {
+            "outgoing_index": outgoing_index,
+            "incoming_index": incoming_index
+        }
+        
+        update_global_state({"ssat": ssat})
+        
+        return ssat
+
+
+    def get_files_to_update(self, feedback_text: str) -> set:
+        
+        context = self.collect_files_from_ssat()
+
+        result = invoke_with_retry(
+            self.agent_chain_with_tools_for_get_files_to_update,
+            {
+                "messages": GetFilesToUpdatePrompts.get_human_prompt().format_messages(
+                    feedback=feedback_text,
+                    context=context
+                )
+            }
+        )
+
+        structured_response : CodeFileUpdateSchema = result["structured_response"]
+        files_to_update = structured_response.model_dump()["files_to_update"]
+
+        return files_to_update
+        
+    def generate_iter_code(self, feedback_text: str) -> tuple[list, list]:
+        repo_name = get_state_value("repo_name")
+
         def retrieve_relevant_experiences(query: str, repo: str, k: int = 5):
             exps = load_repo_experiences(repo)
             if not exps:
@@ -170,73 +307,36 @@ class CodeAgent:
             corpus = []
             for e in exps:
                 scenario = e.get("scenario", "") if isinstance(e, dict) else str(e)
-                experience = json.dumps(e.get("experience", {}), ensure_ascii=False) if isinstance(e, dict) else ""
-                corpus.append((scenario + " " + experience).strip())
+                experience = e.get("experience", "") if isinstance(e, dict) else str(e)
+                corpus.append((f"{scenario} {experience}").strip())
             tokenized = [doc.split() for doc in corpus]
             try:
-                # TODO: 增加个阈值吧，低于阈值的也不要
                 bm25 = BM25Okapi(tokenized)
                 q_tokens = query.split()
                 scores = bm25.get_scores(q_tokens)
                 ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
                 top = [exps[i] for i in ranked[:k]]
                 return top
-            except Exception:
+            except Exception as e:
+                self.logger.warning(f"[Code Agent] Error in retrieving relevant experiences: {e}")
                 return exps[:k]
 
-        top_exps = retrieve_relevant_experiences(feedback or "", repo_name, k=3)
+        top_exps = retrieve_relevant_experiences(feedback_text or "", repo_name, k=3)
         self.logger.info(f"[Code Agent] Retrieved {len(top_exps)} relevant experiences for code update.")
         if top_exps:
-            feedback_with_exps = feedback + "\n\nRelevant experiences:\n" + "\n".join([f"- {e.get('experience','') if isinstance(e, dict) else str(e)}" for e in top_exps])
-            # self.logger.info(f"[Code Agent] Retrieved {len(top_exps)} relevant experiences for code update.")
-        else:
-            feedback_with_exps = feedback
+            feedback_text += "\n\nHere are some relevant experiences:\n"
+            for e in top_exps:
+                for k, v in e.items():
+                    feedback_text += f"{k}: {v}\n"
+                    if k == 'experience':
+                        feedback_text += '\n' 
 
-        files_to_update_set = self.get_files_to_update(feedback_with_exps, latest_code, steps)
-        context = self.build_iter_context(latest_code, files_to_update_set)
-        full_code, diff_code = self.update_files_iteratively(latest_code, files_to_update_set, context, feedback, session_id, steps)
-        self.update_iter_context(context, full_code)
-        self.update_memory(session_id, None, latest_code, feedback, test_status, steps, full_code, diff_code)
+        files_to_update_list = self.get_files_to_update(feedback_text)
+        
+        full_code, diff_code = self.update_files_iteratively(files_to_update_list)
+
+        
         return full_code, diff_code
-
-    def build_iter_context(self, latest_code: list, files_to_update_set: set) -> list:
-        context = []
-        for file_item in latest_code:
-            if file_item["path"] not in files_to_update_set:
-                api_info = extract_api(file_item["code"], file_item["path"])
-                context.append({"path": file_item["path"], "code": api_info})
-        return context
-
-    def update_single_file(self, file_item: dict, context: list, feedback: str, history_str: str, session_id: str, steps: int) -> tuple[dict, str]:
-        prompt = CodePrompts.iter_prompt()
-        input_key = "step"
-        input_data = {
-            "file_item": file_item,
-            "feedback": feedback,
-            "context": context,
-            "history_str": history_str
-        }
-        iter_code_chain = RunnableWithMessageHistory(
-            self.clean_history_runnable | prompt | self.model,
-            get_session_history=get_session_history,
-            input_messages_key=input_key,
-            history_messages_key="history"
-        )
-
-        try:
-            result = iter_code_chain.invoke(
-                input_data,
-                config={
-                    "configurable": {"session_id": session_id, "step": steps, "feedback": feedback},
-                    "callbacks": [self.metrics_handler]
-                }
-            )
-            diff_str = self.compute_code_diff(file_item, result)
-            return result, diff_str
-        except Exception as e:
-            # TODO: 增加错误处理，无法正常生成时重新生成或者记录在一个list中，最后统一处理
-            self.logger.error(f"[Code Agent] Error in step {steps} when updating code for file {file_item.get('path', '')}: {e}")
-            return file_item, "No valid diff"
 
     def compute_code_diff(self, old_file_item: dict, new_file_item: dict) -> str:
         diff = difflib.unified_diff(
@@ -246,41 +346,117 @@ class CodeAgent:
             tofile=new_file_item["path"],
         )
         return "\n".join(diff)
+    
+    def get_related_files_content(self, code_index: dict, related_files: list):
+        context = ""
+        for path in related_files:
+            if path in code_index:
+                file_item = code_index[path]
+                context += f"- {path}\n\n{file_item.get('code')}\n"
+        return context
 
-    def update_files_iteratively(self, latest_code: list, files_to_update_set: set, context: list, feedback: str, session_id: str, steps: int) -> tuple[list, list]:
-        full_code = []
+    def update_files_iteratively(self, files_to_update_list: list[dict]) -> tuple[list, list]:
+        
+        code_index = get_state_value("code_by_path")
+        ssat = get_state_value("ssat")
+        realized_relations = ssat.get("realized_relations", [])
+        outgoing_index = realized_relations.get("outgoing_index", {})
+        incoming_index = realized_relations.get("incoming_index", {})
+        
         diff_code = []
         
-        for file_item in latest_code:
-            diff_str = ""
-            if file_item["path"] in files_to_update_set:
-                self.logger.info(f"[Code Agent] Updating file: {file_item['path']}")
-                memory = get_session_history(session_id)
-                history_str = memory.load_memory_variables({"feedback": feedback})["history"]
-                file_item, diff_str = self.update_single_file(file_item, context, feedback, history_str, session_id, steps)
-                diff_code.append({"path": file_item["path"], "diff": diff_str})
+        for item in files_to_update_list:
+            target_path = item["path"]
+            action = item["action"]
+            rationale = item["rationale"]
+            suggestion = item["suggestion"]
             
-            full_code.append({"path": file_item["path"], "code": file_item["code"], "diff": diff_str})
+            self.logger.info(f"[Code Agent] {action.upper()} file: {target_path}")
+            
+            if action == "remove":
+                if target_path in code_index:
+                    del code_index[target_path]
         
+                ssat = remove_file_from_ssat(ssat, target_path)
+                    
+                for dep in outgoing_index.get(target_path, set()):
+                    incoming_index.get(dep, set()).discard(target_path)
+                for dep in incoming_index.get(target_path, set()):
+                    outgoing_index.get(dep, set()).discard(target_path)
+                outgoing_index.pop(target_path, None)
+                incoming_index.pop(target_path, None)
+                
+                diff_code.append({"path": target_path, "diff": "File removed"})
+                continue
+            
+            if action in ("modify", "create"):
+                if action == "modify" and target_path in code_index:
+                    file_item = code_index[target_path]
+                else:
+                    file_item = {"path": target_path, "code": ""}
+        
+                related_files = (outgoing_index.get(target_path, set()) | incoming_index.get(target_path, set()))
+                context = self.get_related_files_content(code_index, related_files)
+
+                result = invoke_with_retry(
+                    self.agent_chain_with_tools,
+                    {
+                        "messages": CodePrompts.get_iter_prompt().format_messages(
+                            path=target_path,
+                            code=file_item["code"],
+                            suggestion=suggestion,
+                            rationale=rationale,
+                            context=context
+                        )
+                    }
+                )
+
+                code_file: CodeSchema = result["structured_response"]
+                code_file_dict = code_file.model_dump()
+
+                diff_str = self.compute_code_diff(file_item, code_file_dict)
+                code_file_dict["diff"] = diff_str
+                diff_code.append({"path": target_path, "diff": diff_str})
+
+                code_index[target_path] = code_file_dict
+                
+                ssat = update_ssat_realized_from_code(ssat=ssat, file_result=code_file_dict)
+                update_global_state({"ssat": ssat})
+                
+                ssat = self._update_ssat_with_realized_relation(list(code_index.values()))
+
+            else:
+                self.logger.warning(f"[Code Agent] Unknown action '{action}' for file {target_path}")
+        
+        diff_index = {item["path"]: item.get("diff", "") for item in diff_code}
+        full_code = list(code_index.values())
+
+        update_global_state({"ssat": ssat, "code_by_path": code_index})
+        
+
         return full_code, diff_code
 
-    def update_iter_context(self, context: list, full_code: list) -> None:
-        for file_item in full_code:
-            context.append({"path": file_item["path"], "code": extract_api(file_item["code"], file_item["path"])})
+    def collect_files_from_ssat(self) -> Tuple[List[Dict[str, str]], str]:
+        """
+        Traverse SSAT and collect all file paths and descriptions.
 
-    def update_memory(self, session_id: str, latest_skeleton: list, latest_code: list, feedback: str, test_status: Dict, steps: int, full_code: list, diff_code: list) -> None:
-        if steps > 1:
-            memory = get_session_history(session_id)
-            memory.save_context(
-                {"latest_code": latest_code, "feedback": feedback, "test_status": test_status, "step": steps},
-                {"result": full_code, "diff_code": diff_code}
-            )
-        else:
-            memory = get_session_history(session_id)
-            memory.save_context(
-                {"latest_skeleton": latest_skeleton, "test_status": test_status, "step": steps},
-                {"result": full_code}
-            )
+        Returns:
+            files_text:
+                path/to/file.py: description
+                path/to/other.py: description
+        """
+        ssat = get_state_value("ssat")
+        lines: List[str] = []
+
+        for module in ssat.get("modules", []):
+            for file in (module.get("files") or []):
+                path = file.get("path")
+                description = file.get("description", "")
+                if not path:
+                    continue
+                lines.append(f"{path}: {description}")
+        files_text = "\n".join(lines)
+        return files_text
 
     def save_code_to_jsonl(self, repo_dir: str, steps: int, full_code: list) -> None:
         code_jsonl_dir = f"{repo_dir}{self.code_json_dir_suffix}"
@@ -298,8 +474,9 @@ class CodeAgent:
         load = None
         if steps > 1:
             try:
-                load = load_step(shared_session_id, step=steps - 1)
-            except Exception:
+                load = load_code_step(shared_session_id, step=steps - 1)
+            except Exception as e:
+                self.logger.error(f"[Code Agent] Error in loading previous step (step {steps - 1}) data: {e}")
                 load = None
 
         generated_code = []
@@ -322,49 +499,44 @@ class CodeAgent:
         return generated_code, test_status, feedback
 
     def __call__(self, state: dict) -> dict:
-        dataset = state["dataset"]
         repo_name = state["repo_name"]
         repo_dir = state["repo_dir"]
-        latest_skeleton = state["latest_skeleton"]
-        # latest_code = state.get("latest_code", "")
-        steps = state.get("code_steps", 0)
-        # feedback = state.get("code_feedback", "")
-        # test_status = state.get("test_status", {})
-        session_id = self.get_session_id(repo_name)
+        steps = state.get("code_steps", 0) + 1
 
-        steps += 1
         self.logger.info(f"==========CODE GENERATION IN STEP {steps}===========")
 
         latest_code, test_status, feedback = self.load_previous_step_data(repo_name, steps)
+        latest_skeleton = load_skeleton_step(f"skeleton_shared_{repo_name}").generated_skeleton
 
         if steps == 1:
-            latest_skeleton = self.reorder_skeleton_by_topo(latest_skeleton)
-            full_code = self.generate_init_code(latest_skeleton, {}, session_id, steps)
+            latest_skeleton = self.reorder_skeleton(latest_skeleton)
+            full_code = self.generate_init_code(repo_name, latest_skeleton, steps)
+            diff_code = []
         else:
-            full_code, _ = self.generate_iter_code(latest_code, feedback, {}, session_id, steps)
+            full_code, diff_code = self.generate_iter_code(feedback)
 
         # persist shared step record (shared session id between CodeAgent and CodeJudgeAgent)
         shared_session_id = f"code_shared_{repo_name}"
-        record = SharedStepRecord(
+        record = SharedStepCodeRecord(
             step=steps,
             generated_code=full_code,
+            diff_code=diff_code,
             test_result=None,
             feedbacks=None,
+            ssat=get_state_value("ssat"),
             experiences=[],
         )
         try:
-            save_step(shared_session_id, repo_dir, record)
-        except Exception:
+            save_code_step(shared_session_id, repo_dir, record)
+        except Exception as e:
+            self.logger.error(f"[Code Agent] Error in saving shared step record at step {steps}: {e}")
             pass
 
         self.save_code_to_jsonl(repo_dir, steps, full_code)
 
+        update_global_state({"code_steps": steps})
         updated_state = {
             **state,
-            "latest_code": full_code,
-            "code_steps": steps,
-            "test_status": test_status,
-            "dataset": dataset,
-            "repo_dir": repo_dir
+            "code_steps": steps
         }
         return updated_state

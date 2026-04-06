@@ -1,19 +1,15 @@
 from langchain_deepseek import ChatDeepSeek
 from langchain_openai import ChatOpenAI
-from logger import get_logger
+from utils.logger import get_logger
 import re
 import os
 import json
 from typing import List, Dict, Union
+import time
+import random
+from openai import APIError, RateLimitError
 
 logger = get_logger()
-
-
-# os.environ["OPENAI_API_KEY"] = ''
-# llm = ChatOpenAI(model_name="gpt-4o", temperature=0, top_p=1.0)
-
-# os.environ["OPENAI_API_KEY"] = 'sk-zz0DffFstsEOQ08EjN7ObHHgItj4N4zAybSh55vxQgPXn3fv'
-# llm = ChatOpenAI(model_name="gpt-4o", temperature=0, top_p=1.0, base_url="https://api.chatanywhere.tech/v1")
 
 
 def log_input(x):
@@ -23,7 +19,6 @@ def log_input(x):
         content = x.content
     else:
         content = str(x)
-    # logger.info(f"[Prompt Input]:\n{content}")
     return x
 
 def log_output(x):
@@ -33,11 +28,9 @@ def log_output(x):
         content = x.content
     else:
         content = str(x)
-    # logger.info(f"[Prompt Output]:\n{content}")
     return x
 
 def extract_mermaid(text: str) -> str:
-    # 保证 text 是字符串
     if hasattr(text, "to_string"):
         text = text.to_string()
     elif hasattr(text, "content"):
@@ -84,3 +77,16 @@ def clean_history(input_dict):
     cleaned = "\n\n".join([msg.content for msg in history if hasattr(msg, "content")])
     input_dict["history"] = cleaned
     return input_dict
+
+def invoke_with_retry(agent, payload, max_retries=5, base_delay=2):
+    for attempt in range(max_retries):
+        try:
+            return agent.invoke(payload)
+
+        except (ConnectionError, TimeoutError, APIError, RateLimitError) as e:
+            if attempt == max_retries - 1:
+                raise
+
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            print(f"[Retry] API failed ({e}), retrying in {delay:.2f}s...")
+            time.sleep(delay)

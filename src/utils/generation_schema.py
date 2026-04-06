@@ -64,7 +64,6 @@ SSAT_JSON_SCHEMA = {
       "required": ["name", "path", "description"]
     },
 
-# 更新：区别global变量和global代码块
     "GlobalVariable": {
       "type": "object",
       "properties": {
@@ -83,7 +82,6 @@ SSAT_JSON_SCHEMA = {
       "required": ["description"]
     },
 
-# 更新：增加class的成员变量
     "Class": {
       "type": "object",
       "description": "A class defined inside a file.",
@@ -193,9 +191,13 @@ ARCH_JUDGE_JSON_SCHEMA = {
       "description": "Overall score for the architecture evaluation.",
       "minimum": 1,
       "maximum": 10
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["continue", "stop"]
     }
   },
-  "required": ["feedback", "final_score"],
+  "required": ["feedback", "final_score", "decision"],
 }
 
 SKELETON_JSON_SCHEMA = {
@@ -243,14 +245,63 @@ SKELETON_JUDGE_SCHEMA = {
       },
       "required": ["directory_structure_matching", "interface_and_call_relationship_matching"]
     },
+    "suggested_changes": {
+      "type": "array",
+      "description": "A list of suggested changes for specific files.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "The file path to be changed." },
+          "suggestion": { "type": "string", "description": "The suggestion for this file." }
+        },
+        "required": ["path", "suggestion"]
+      }
+    },
     "final_score": {
       "type": "number",
       "description": "Overall score for the skeleton evaluation.",
       "minimum": 1,
       "maximum": 10
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["continue", "stop"]
     }
   },
-  "required": ["feedback", "final_score"],
+  "required": ["feedback", "final_score", "decision"],
+}
+
+SKELETON_FILE_UPDATE_SCHEMA = {
+  "title": "SkeletonFileUpdateSchema",
+  "type": "object",
+  "description": "Schema for skelelton files to be updated.",
+  "properties": {
+    "files_to_update": {
+      "type": "array",
+      "description": "The paths of the skelelton files to be updated.",
+      "items": { 
+        "type": "object",
+        "description": "The file path of the skelelton file to be updated.",
+        "properties": {
+          "path": { "type": "string" },
+          "action": {
+            "type": "string",
+            "enum": ["modify", "create", "remove"]
+            },
+          "rationale": { 
+            "type": "string",
+            "description": "The rationale for updating the file."
+            },
+          "suggestion": { 
+            "type": "string",
+            "description": "The suggestion for modifying the file."
+            }
+        },
+        "required": ["path", "action", "rationale", "suggestion"]
+      }
+    },
+  },
+  "required": ["files_to_update"]
 }
 
 CODE_JSON_SCHEMA = {
@@ -265,6 +316,10 @@ CODE_JSON_SCHEMA = {
       "code": {
         "type": "string",
         "description": "The complete code for the file."
+      },
+      "description": {
+        "type": "string",
+        "description": "The descrition of the code file."
       }
     },
   "required": ["path", "code"]
@@ -315,8 +370,24 @@ CODE_FILE_UPDATE_SCHEMA = {
       "type": "array",
       "description": "The paths of the code files to be updated.",
       "items": { 
-        "type": "string",
-        "description": "The file path of the code file to be updated."
+        "type": "object",
+        "description": "The file path of the code file to be updated.",
+        "properties": {
+          "path": { "type": "string" },
+          "action": {
+            "type": "string",
+            "enum": ["modify", "create", "remove"]
+            },
+          "rationale": { 
+            "type": "string",
+            "description": "The rationale for updating the file."
+            },
+          "suggestion": { 
+            "type": "string",
+            "description": "The suggestion for modifying the file."
+            }
+        },
+        "required": ["path", "action", "rationale", "suggestion"]
       }
     },
   },

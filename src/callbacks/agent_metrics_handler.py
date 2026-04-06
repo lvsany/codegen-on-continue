@@ -1,17 +1,23 @@
-import os
-import time
 import json
-import logging
-from datetime import datetime
-from typing import Any, Dict, Optional, List
-from langchain.callbacks.base import BaseCallbackHandler
+import time
+import uuid
+import os
+from typing import Any, Dict, List, Optional, Set
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
+
 
 class AgentMetricsHandler(BaseCallbackHandler):
     """
-    通用 callback handler，支持全局 log 文件：
-    - 使用 AgentMetricsHandler.set_global_log_file(path) 在程序启动时设置全局文件
-    - 若实例化时传入 log_file，会优先使用实例级文件（仍保留兼容性）
+    Per-invoke metrics logger for LangChain agents.
+
+    - One JSON line per agent.invoke()
+    - Records aggregated token usage
+    - Records per-LLM-call details in execution order
+    - Attributes tool calls to the LLM call that triggered them
     """
+
     GLOBAL_LOG_FILE: Optional[str] = None
 
     @classmethod
@@ -19,83 +25,190 @@ class AgentMetricsHandler(BaseCallbackHandler):
         cls.GLOBAL_LOG_FILE = path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    def __init__(self, log_file: Optional[str] = None):
-        # 优先使用实例传入的 log_file，否则用全局文件，否则 fallback 到 ./logs/agent_metrics.log
-        self.log_file = log_file or self.__class__.GLOBAL_LOG_FILE or "./logs/agent_metrics.log"
-        os.makedirs(os.path.dirname(self.log_file) or ".", exist_ok=True)
-        self._start_ts = None
-        self._start_iso = None
-        self._prompts = None
-        self._meta: Dict[str, Any] = {}
-        self._logger = logging.getLogger(f"AgentMetricsHandler:{self.log_file}")
-        if not self._logger.handlers:
-            fh = logging.FileHandler(self.log_file, encoding="utf-8")
-            fh.setFormatter(logging.Formatter("%(message)s"))
-            self._logger.addHandler(fh)
-            self._logger.setLevel(logging.INFO)
+    def __init__(self, log_path: Optional[str] = None):
+        # Store provided explicit path; if None, resolve at write-time from class GLOBAL_LOG_FILE.
+        self.log_path = log_path
+        # Only create dir now if an explicit log_path provided
+        if self.log_path:
+            os.makedirs(os.path.dirname(self.log_path) or ".", exist_ok=True)
+        self._reset()
 
-    def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs) -> None:
-        self._start_ts = time.time()
-        self._start_iso = datetime.utcnow().isoformat() + "Z"
-        self._prompts = prompts
-        self._meta = kwargs.get("metadata", kwargs)
+    # ------------------------------------------------------------------
+    # lifecycle helpers
+    # ------------------------------------------------------------------
 
-    def on_llm_end(self, response: Any, **kwargs) -> None:
-        end_ts = time.time()
-        end_iso = datetime.utcnow().isoformat() + "Z"
-        elapsed = None
-        if self._start_ts:
-            elapsed = end_ts - self._start_ts
+    def _reset(self):
+        # invoke scope
+        self.invoke_id: Optional[str] = None
+        self.start_time: Optional[float] = None
 
-        # 尝试获取输出文本（兼容不同 response 结构）
-        output_text = None
-        try:
-            gens = getattr(response, "generations", None)
-            if gens and len(gens) > 0 and len(gens[0]) > 0:
-                output_text = getattr(gens[0][0], "text", None) or str(gens[0][0])
-            else:
-                output_text = str(response)
-        except Exception:
-            output_text = str(response)
+        # aggregated tokens
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.total_tokens: int = 0
 
-        # 尝试提取 llm_output 中的 token usage（不同实现可能在不同键）
-        llm_output = None
-        try:
-            llm_output = getattr(response, "llm_output", None) or (response.get("llm_output") if isinstance(response, dict) else None)
-        except Exception:
-            llm_output = None
+        # counters
+        self.llm_calls: int = 0
+        self.tool_calls: int = 0
 
-        def extract_tokens(o):
-            if not o or not isinstance(o, dict):
-                return None, None, None
-            # 常见结构： {"prompt_tokens":..., "completion_tokens":..., "total_tokens":...}
-            pt = o.get("prompt_tokens") or o.get("promptTokenCount")
-            ct = o.get("completion_tokens") or o.get("completionTokenCount")
-            tt = o.get("total_tokens") or o.get("totalTokenCount")
-            # 有些工具把 usage 放在嵌套 usage 键
-            if not any([pt, ct, tt]) and "token_usage" in o and isinstance(o["token_usage"], dict):
-                u = o["token_usage"]
-                pt = pt or u.get("prompt_tokens")
-                ct = ct or u.get("completion_tokens")
-                tt = tt or u.get("total_tokens")
-            return pt, ct, tt
+        # metadata
+        self.model_names: List[str] = []
+        self.tools_used: List[str] = []
 
-        prompt_tokens, completion_tokens, total_tokens = extract_tokens(llm_output)
+        # per-LLM-call execution trace
+        self.llm_call_details: List[Dict[str, Any]] = []
+
+        # pointer to current LLM call
+        self._current_llm_call: Optional[Dict[str, Any]] = None
+
+    def _finalize_and_log(self):
+        if self.invoke_id is None or self.start_time is None:
+            return
 
         record = {
-            "timestamp_start": self._start_iso,
-            "timestamp_end": end_iso,
-            "elapsed_seconds": elapsed,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "meta": self._meta,
-            "input_text": ("\n\n".join(self._prompts)) if self._prompts else None,
-            "output_text": output_text,
+            "invoke_id": self.invoke_id,
+            "latency": time.time() - self.start_time,
+
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+
+            "llm_calls": self.llm_calls,
+            "tool_calls": self.tool_calls,
+
+            "model_names": list(self.model_names),
+            "tools_used": list(self.tools_used),
+
+            "llm_call_trace": self.llm_call_details,
         }
 
-        try:
-            self._logger.info(json.dumps(record, ensure_ascii=False))
-        except Exception:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Resolve effective log path at write time so callers can change GLOBAL_LOG_FILE dynamically.
+        effective_path = self.log_path or self.__class__.GLOBAL_LOG_FILE or "./logs/agent_metrics.log"
+        os.makedirs(os.path.dirname(effective_path) or ".", exist_ok=True)
+        with open(effective_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        self._reset()
+
+    # ------------------------------------------------------------------
+    # LangChain callbacks
+    # ------------------------------------------------------------------
+
+    def on_chain_start(
+        self,
+        serialized: Dict[str, Any],
+        inputs: Dict[str, Any],
+        run_id: uuid.UUID,
+        parent_run_id: Optional[uuid.UUID] = None,
+        **kwargs: Any,
+    ):
+        # ONLY treat root chain as one invoke
+        if parent_run_id is None and self.invoke_id is None:
+            self.invoke_id = str(run_id)
+            self.start_time = time.time()
+
+    def on_chain_end(
+        self,
+        outputs: Dict[str, Any],
+        run_id: uuid.UUID,
+        parent_run_id: Optional[uuid.UUID] = None,
+        **kwargs: Any,
+    ):
+        # ONLY finalize on root chain end
+        if parent_run_id is None and str(run_id) == self.invoke_id:
+            self._finalize_and_log()
+
+    # ---------------- LLM ----------------
+
+    def on_llm_start(
+        self,
+        serialized: Dict[str, Any],
+        prompts: List[str],
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ):
+        self.llm_calls += 1
+
+        model_name = (
+            serialized.get("kwargs", {}).get("model")
+            or serialized.get("id", [None])[-1]
+        )
+
+        if model_name:
+            # `model_name` can be a string or an iterable of names.
+            # Use append for single strings to avoid splitting into characters;
+            # extend when it's a list/tuple.
+            if isinstance(model_name, (list, tuple)):
+                self.model_names.extend(model_name)
+            else:
+                self.model_names.append(model_name)
+
+        llm_call = {
+            "index": len(self.llm_call_details),
+            "model": model_name,
+            "prompt_tokens": 0,
+            "prompt": prompts, 
+            "outputs": [],  
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+
+        self.llm_call_details.append(llm_call)
+        self._current_llm_call = llm_call
+
+    def on_llm_end(
+        self,
+        response: LLMResult,
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ):
+        if not self._current_llm_call:
+            return
+        
+        outputs = []
+        for gen_list in response.generations:
+            for gen in gen_list:
+                if hasattr(gen, "text") and gen.text is not None:
+                    outputs.append(gen.text)
+                elif hasattr(gen, "message"):
+                    outputs.append(gen.message.content)
+
+        self._current_llm_call["outputs"] = outputs
+
+        usage = response.llm_output.get("token_usage") if response.llm_output else None
+        if not usage:
+            return
+
+        prompt = usage.get("prompt_tokens", 0)
+        completion = usage.get("completion_tokens", 0)
+        total = usage.get("total_tokens", 0)
+
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += total
+
+        self._current_llm_call["prompt_tokens"] = prompt
+        self._current_llm_call["completion_tokens"] = completion
+        self._current_llm_call["total_tokens"] = total
+
+        self._current_llm_call = None
+
+    # ---------------- Tool ----------------
+
+    def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ):
+        self.tool_calls += 1
+
+        tool_name = serialized.get("name")
+        if tool_name:
+            # `tool_name` is often a string; append to avoid character splitting.
+            if isinstance(tool_name, (list, tuple)):
+                self.tools_used.extend(tool_name)
+            else:
+                self.tools_used.append(tool_name)
+

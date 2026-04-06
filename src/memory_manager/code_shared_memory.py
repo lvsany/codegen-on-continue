@@ -3,6 +3,8 @@ from typing import List, Dict, Any, Optional
 import os
 import json
 import threading
+import time
+import copy
 
 
 @dataclass
@@ -25,9 +27,7 @@ class TestResult:
 
 @dataclass
 class Feedback:
-    # 原始结果（JSON list）
     result: Optional[List[Dict[str, Any]]] = None
-    # 对原始结果进行组织、摘要后的文本描述
     text: str = ""
     timestamp: Optional[str] = None
 
@@ -41,33 +41,37 @@ class Experience:
 
 
 @dataclass
-class SharedStepRecord:
+class SharedStepCodeRecord:
     step: int
     generated_code: List[Dict[str, Any]]
+    ssat: List[Dict[str, Any]]
+    diff_code: List[Dict[str, Any]] = None
     test_result: Optional[Dict[str, Any]] = None
     feedbacks: Optional[Dict[str, Any]] = None
     experiences: List[Dict[str, Any]] = None
+    timestramp: Optional[str] = None
 
 
-class _GlobalSharedStore:
+class _CodeGlobalSharedStore:
     def __init__(self):
         self.lock = threading.RLock()
-        self.store: Dict[str, Dict[int, SharedStepRecord]] = {}
+        self.store: Dict[str, Dict[int, SharedStepCodeRecord]] = {}
         # repo-level experiences: key by repo_name
         self.repo_experiences: Dict[str, List[Dict[str, Any]]] = {}
 
-    def save_step(self, session_id: str, repo_dir: str, record: SharedStepRecord) -> None:
+    def save_step(self, session_id: str, repo_dir: str, record: SharedStepCodeRecord) -> None:
         with self.lock:
             if session_id not in self.store:
                 self.store[session_id] = {}
+            record.timestramp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.store[session_id][record.step] = record
         # persist to repo_dir/tmp_files/shared_step_{step}.json
         try:
             json_dir = os.path.join(repo_dir, "tmp_files")
             os.makedirs(json_dir, exist_ok=True)
-            path = os.path.join(json_dir, f"shared_step_{record.step}.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(asdict(record), f, ensure_ascii=False, indent=2)
+            path = os.path.join(json_dir, "code_shared_steps.jsonl")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
         except Exception:
             pass
 
@@ -91,16 +95,20 @@ class _GlobalSharedStore:
         with self.lock:
             if session_id not in self.store or step not in self.store[session_id]:
                 # create minimal record
-                rec = SharedStepRecord(step=step, generated_code=[], test_result=None, feedbacks=None, experiences=[])
+                rec = SharedStepCodeRecord(step=step, generated_code=[], test_result=None, feedbacks=None, experiences=[])
                 self.store.setdefault(session_id, {})[step] = rec
             rec = self.store[session_id][step]
             # merge partial into rec
             if "generated_code" in partial and partial["generated_code"] is not None:
                 rec.generated_code = partial["generated_code"]
+            if "diff_code" in partial and partial["diff_code"] is not None:
+                rec.generated_code = partial["diff_code"]
             if "test_result" in partial:
                 rec.test_result = partial["test_result"]
             if "feedbacks" in partial and partial["feedbacks"] is not None:
                 rec.feedbacks = partial["feedbacks"]
+            if "ssat" in partial and partial["ssat"] is not None:
+                rec.ssat = partial["ssat"]
             if "experiences" in partial and partial["experiences"] is not None:
                 rec.experiences = (rec.experiences or []) + partial["experiences"]
                 # also append to repo-level experiences if we can infer repo_name
@@ -112,19 +120,19 @@ class _GlobalSharedStore:
                             self._append_repo_experience(repo_name, exp, repo_dir=repo_dir)
                 except Exception:
                     pass
+            rec.timestramp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         # optionally persist
         if repo_dir:
             try:
                 json_dir = os.path.join(repo_dir, "tmp_files")
                 os.makedirs(json_dir, exist_ok=True)
-                path = os.path.join(json_dir, f"shared_step_{step}.json")
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(asdict(rec), f, ensure_ascii=False, indent=2)
+                path = os.path.join(json_dir, "code_shared_steps.jsonl")
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
             except Exception:
                 pass
 
-    # 指定step时返回对应信息，否则返回最新信息
-    def load_step(self, session_id: str, step: Optional[int] = None) -> Optional[SharedStepRecord]:
+    def load_step(self, session_id: str, step: Optional[int] = None) -> Optional[SharedStepCodeRecord]:
         with self.lock:
             if session_id not in self.store:
                 return None
@@ -133,35 +141,51 @@ class _GlobalSharedStore:
                 steps = sorted(self.store[session_id].keys())
                 if not steps:
                     return None
-                return self.store[session_id][steps[-1]]
-            return self.store[session_id].get(step)
+                record = self.store[session_id][steps[-1]]
+                return copy.deepcopy(record) if record else None
+            record = self.store[session_id].get(step)
+            return copy.deepcopy(record) if record else None
+        
+    def get_best_generated_code(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
+        with self.lock:
+            if session_id not in self.store:
+                return None
+
+            best_record = None
+            best_passed = -1
+
+            for rec in self.store[session_id].values():
+                if not rec.test_result:
+                    continue
+                passed = rec.test_result.get("passed")
+                if passed is None:
+                    continue
+                if passed >= best_passed:
+                    best_passed = passed
+                    best_record = rec
+
+            return copy.deepcopy(best_record.generated_code) if best_record else None
+
+            
 
 
-_GLOBAL = _GlobalSharedStore()
+_GLOBAL = _CodeGlobalSharedStore()
 
 
-def save_step(session_id: str, repo_dir: str, record: SharedStepRecord) -> None:
+def save_code_step(session_id: str, repo_dir: str, record: SharedStepCodeRecord) -> None:
     _GLOBAL.save_step(session_id, repo_dir, record)
 
 
-def update_step(session_id: str, step: int, partial: Dict[str, Any], repo_dir: Optional[str] = None) -> None:
+def update_code_step(session_id: str, step: int, partial: Dict[str, Any], repo_dir: Optional[str] = None) -> None:
     _GLOBAL.update_step(session_id, step, partial, repo_dir=repo_dir)
 
 
-def load_step(session_id: str, step: Optional[int] = None) -> Optional[SharedStepRecord]:
+def load_code_step(session_id: str, step: Optional[int] = None) -> Optional[SharedStepCodeRecord]:
     return _GLOBAL.load_step(session_id, step)
 
 
-def append_experience(session_id: str, step: int, experience: Experience, repo_dir: Optional[str] = None) -> None:
-    exp_dict = asdict(experience)
-    update_step(session_id, step, {"experiences": [exp_dict]}, repo_dir=repo_dir)
-    # also add to repo-level experiences if possible
-    try:
-        if session_id.startswith("code_shared_"):
-            repo_name = session_id[len("code_shared_"):]
-            _GLOBAL._append_repo_experience(repo_name, exp_dict, repo_dir=repo_dir)
-    except Exception:
-        pass
+def append_experience(session_id: str, step: int, experience: dict, repo_dir: Optional[str] = None) -> None:
+    update_code_step(session_id, step, {"experiences": [experience]}, repo_dir=repo_dir)
 
 
 def load_repo_experiences(repo_name: str) -> List[Dict[str, Any]]:
@@ -181,3 +205,7 @@ def clear_repo_experiences(repo_name: str, repo_dir: Optional[str] = None) -> No
                 os.remove(path)
         except Exception:
             pass
+
+def load_best_generated_code(session_id: str) -> Optional[List[Dict[str, Any]]]:
+    return _GLOBAL.get_best_generated_code(session_id)
+

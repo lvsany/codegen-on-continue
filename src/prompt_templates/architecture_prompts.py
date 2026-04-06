@@ -1,5 +1,5 @@
-from langchain.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 class ArchitecturePrompts:
     SYSTEM = """You are an expert software architect assistant.
@@ -56,53 +56,39 @@ Follow JSON schema strictly. Avoid hallucinations.
 
 """
 
-# TODO: refine the ITER prompt, add instructions?
     ITER = """Please refine and improve a previously generated SSAT (shown in <Previous_SSAT>) based on the feedback (shown in <Feedback_from_Judge>).
 
+You are given: the previously generated SSAT, and the feedback pointing out issues, omissions, or inconsistencies.
+
+Other reference documents (e.g., PRD, UML Class Diagram, UML Sequence Diagram, Architecture Design Document) are NOT directly provided in this prompt.
+If and only if the feedback or the current SSAT requires verification, clarification, or additional details from these documents, you may call the appropriate tool to retrieve the needed information.
+
+Do NOT blindly re-extract all information. Focus on minimal, targeted modifications that address the feedback.
+    
 ## Inputs:
 
 <Previous_SSAT>
-```json
 {latest_arch}
-```
 </Previous_SSAT>
 
 <Feedback_from_Judge>
 {feedback}
 </Feedback_from_Judge>
 
-<PRD>
-{prd}
-</PRD>
-
-<UML_Class_Diagram>
-{uml_class}
-</UML_Class_Diagram>
-
-<UML_Sequence_Diagram>
-{uml_sequence}
-</UML_Sequence_Diagram>
-
-<Architecture_Design_Document>
-{arch_design}
-</Architecture_Design_Document>
-
 """
-
+    
     @staticmethod
-    def init_prompt():
+    def get_system_prompt():
+        return ArchitecturePrompts.SYSTEM
+    
+    @staticmethod
+    def get_init_human_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", ArchitecturePrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", ArchitecturePrompts.INIT)
         ])
     
     @staticmethod
-    def iter_prompt():
+    def get_iter_human_prompt():
         return ChatPromptTemplate.from_messages([
-            ("system", ArchitecturePrompts.SYSTEM),
-            # 确认是否注入历史
-            # MessagesPlaceholder("history"),
             ("human", ArchitecturePrompts.ITER)
         ])
