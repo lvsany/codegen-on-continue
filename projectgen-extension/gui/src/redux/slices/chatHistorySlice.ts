@@ -261,6 +261,36 @@ const chatHistorySlice = createSlice({
         saveToStorage(state);
       }
     },
+
+    // 编辑指定用户消息，并截断其后的历史以便重新生成
+    editUserMessageAndTruncate: (state, action: PayloadAction<{ messageId: string; content: string }>) => {
+      const session = state.sessions.find(s => s.id === state.currentSessionId);
+      if (!session) {
+        return;
+      }
+
+      const messageIndex = session.messages.findIndex(
+        (message) => message.id === action.payload.messageId && message.role === 'user'
+      );
+      if (messageIndex === -1) {
+        return;
+      }
+
+      const nextContent = action.payload.content.trim();
+      if (!nextContent) {
+        return;
+      }
+
+      session.messages[messageIndex].content = nextContent;
+      session.messages[messageIndex].timestamp = Date.now();
+      session.messages = session.messages.slice(0, messageIndex + 1);
+      session.updatedAt = Date.now();
+
+      const firstUserMessage = session.messages.find((message) => message.role === 'user');
+      session.title = firstUserMessage ? firstUserMessage.content.slice(0, 50) : 'New Chat';
+
+      saveToStorage(state);
+    },
   },
 });
 
@@ -276,6 +306,7 @@ export const {
   renameSession,
   addGenerationMessage,
   updateGenerationMessage,
+  editUserMessageAndTruncate,
 } = chatHistorySlice.actions;
 
 // Selectors

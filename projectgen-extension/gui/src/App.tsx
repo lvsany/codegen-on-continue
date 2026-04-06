@@ -2,7 +2,7 @@ import React, { useEffect, useContext, useCallback, useState, useRef } from 'rea
 import styled, { keyframes } from 'styled-components';
 import { useAppDispatch, useAppSelector } from './redux/hooks';
 import { startGeneration, updateProgress, addFile, completeGeneration, stopGeneration, setError, setStatusMessage, resetGeneration } from './redux/slices/projectGenSlice';
-import { addUserMessage, addAssistantMessage, selectCurrentMessages, createSession, addGenerationMessage, updateGenerationMessage, clearCurrentSession } from './redux/slices/chatHistorySlice';
+import { addUserMessage, addAssistantMessage, selectCurrentMessages, createSession, addGenerationMessage, updateGenerationMessage, clearCurrentSession, editUserMessageAndTruncate } from './redux/slices/chatHistorySlice';
 import { VsCodeApiContext } from './context/VsCodeApi';
 import { SimpleInput, SimpleInputRef } from './components/mainInput/SimpleInput';
 import { ChatHistory } from './components/chat/ChatHistory';
@@ -332,17 +332,12 @@ export const App: React.FC = () => {
     return { isCommand: false, originalMessage: message };
   };
     
-  const handleSubmit = useCallback((message: string) => {
-    setShowEmpty(false);
-    
-    // 添加用户消息到聊天历史
-    dispatch(addUserMessage(message));
-
+  const runMessage = useCallback((message: string) => {
     const parsed = parseCommand(message);
-    
+
     if (parsed.isCommand) {
       dispatch(startGeneration(parsed.repo || '未指定路径'));
-      
+
       // 添加生成消息（不再添加助手消息）
       dispatch(addGenerationMessage({
         repo: parsed.repo || 'repository',
@@ -370,9 +365,25 @@ export const App: React.FC = () => {
 
     // 普通消息：添加简单助手响应
     dispatch(addAssistantMessage(`I received your message: "${message.slice(0, 100)}${message.length > 100 ? '...' : ''}"\n\nTo generate a project, use: /projectgen repo=<path>`));
-    
+
     // 不发送到后端（目前只支持 /projectgen 命令）
   }, [dispatch, vscode, currentConfig]);
+
+  const handleSubmit = useCallback((message: string) => {
+    setShowEmpty(false);
+    dispatch(addUserMessage(message));
+    runMessage(message);
+  }, [dispatch, runMessage]);
+
+  const handleResubmitUserMessage = useCallback((messageId: string, message: string) => {
+    if (isGenerating) {
+      return;
+    }
+    setShowEmpty(false);
+    dispatch(resetGeneration());
+    dispatch(editUserMessageAndTruncate({ messageId, content: message }));
+    runMessage(message);
+  }, [dispatch, isGenerating, runMessage]);
   
   const handleClear = useCallback(() => {
     setShowEmpty(true);
@@ -448,6 +459,7 @@ export const App: React.FC = () => {
               messages={chatMessages} 
               isStreaming={isGenerating}
               onFileClick={handleFileClick}
+              onResubmitUserMessage={handleResubmitUserMessage}
             />
           </>
         )}
